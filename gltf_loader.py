@@ -155,7 +155,7 @@ _IMAGE_CACHE = {}
 
 
 def load_gltf(path):
-    """Charge un .gltf (JSON + .bin et images externes, ex. pack Quaternius).
+    """Charge un .gltf (JSON + .bin et images externes).
 
     Retourne une liste de primitives sous forme de dicts :
     verts [pos(3), norm(3), uv(2)], idx, color, image (PIL RGBA ou None),

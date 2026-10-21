@@ -4,10 +4,8 @@
 - Arbres : pin du projet C++ de 2A, préparé par tools/prepare_pine.py (branches retirées,
   pas de feuillage en bas : fût dégagé sur environ le tiers inférieur), répartis
   aléatoirement avec une distance minimale entre troncs.
-- Décor du pack Stylized Nature MegaKit (Quaternius, CC0) : fougères, champignons,
-  plantes, trèfle et fleurs (ni herbe, ni cailloux, ni rochers).
-- Collisions : cylindre vertical par tronc, deux cylindres pour le feuillage. Le décor
-  au sol n'a pas de collision.
+- Sol forestier procédural (terre et mousse), sans autre décor.
+- Collisions : cylindre vertical par tronc, deux cylindres pour le feuillage.
 - Départ en bordure sud, cible (coordonnée connue) en bordure nord.
 
 Tout est tiré à partir d'une graine. Les modèles et textures sont chargés une seule
@@ -22,10 +20,8 @@ import moderngl
 import numpy as np
 
 from collision import VerticalCylinder
-from gltf_loader import load_gltf
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-NATURE_DIR = os.path.join(HERE, "Assets", "models", "nature")
 PINE_DIR = os.path.join(HERE, "Assets", "models", "pine")
 
 FOREST_VERTEX_SHADER = """
@@ -109,13 +105,7 @@ PINE_TRUNK_RADIUS = 0.13         # rayon du fût vers 0,5 (au-dessus de l'évase
 PINE_HEIGHT = 3.9
 PINE_FOLIAGE = [(1.3, 2.3, 1.0), (2.3, 3.9, 0.6)]  # (y min, y max, rayon) des cylindres de feuillage
 TREE_SPACING = 1.6               # demi-distance minimale entre deux troncs (m)
-DECOR = {  # nom : (nombre, échelle min, échelle max) ; sans collision (les modèles du pack sont ~2x trop grands)
-    "Fern_1": (60, 0.6, 1.0),
-    "Plant_1": (35, 0.5, 0.8), "Plant_7": (35, 0.6, 1.0),
-    "Clover_1": (60, 0.25, 0.4), "Clover_2": (60, 0.25, 0.4),
-    "Flower_3_Group": (30, 0.25, 0.4), "Flower_4_Group": (30, 0.25, 0.4),
-}
-MUSHROOMS = ["Mushroom_Common", "Mushroom_Laetiporus"]
+
 
 
 def _instance_matrix(x, z, yaw, scale, y=0.0):
@@ -134,10 +124,7 @@ class ForestAssets:
         self.ctx = ctx
         self.prog = ctx.program(vertex_shader=FOREST_VERTEX_SHADER, fragment_shader=FOREST_FRAGMENT_SHADER)
         self.textures = {}
-        self.models = {}  # nom -> {"prims": [...], "bbox": (lo, hi), "trunk": ..., "leaves": ...}
-        names = set(DECOR) | set(MUSHROOMS)
-        for name in sorted(names):
-            self.models[name] = self._load(name)
+        self.models = {}  # nom -> {"prims": [...], "bbox": (lo, hi)}
         self.models["Pine"] = self._load_pine()
         # sol forestier : un grand quad
         quad = np.array([[-1, 0, -1, 0, 1, 0, 0, 0], [1, 0, -1, 0, 1, 0, 1, 0],
@@ -182,20 +169,6 @@ class ForestAssets:
             small[:, :, 3] = np.clip(a * hi, 0, 1) * 255.0
             tex.write(small.astype("u1").tobytes(), level=level)
             level += 1
-
-    def _load(self, name):
-        prims = load_gltf(os.path.join(NATURE_DIR, name + ".gltf"))
-        out = []
-        for p in prims:
-            out.append({
-                "vbo": self.ctx.buffer(p["verts"].tobytes()),
-                "ibo": self.ctx.buffer(p["idx"].tobytes()),
-                "texture": self._texture(p["image"]) if p["image"] is not None else None,
-                "alpha_mask": p["alpha_mask"],
-                "color": p["color"],
-            })
-        pts = np.vstack([p["verts"][:, :3] for p in prims])
-        return {"prims": out, "bbox": (pts.min(axis=0), pts.max(axis=0))}
 
     def _load_pine(self):
         from PIL import Image
@@ -269,9 +242,8 @@ class ForestEnv:
 
         # Pins
         n_trees = int(self.tree_density * self.size * self.size)
-        trunks = []
         for _ in range(n_trees * 40):
-            if len(trunks) >= n_trees:
+            if len(self.obstacles) >= n_trees:
                 break
             p = np.array([rng.uniform(-h, h), rng.uniform(-h, h)])
             if not is_free(p, TREE_SPACING):
@@ -279,7 +251,6 @@ class ForestEnv:
             scale, yaw = rng.uniform(*PINE_SCALE), rng.uniform(0, 2 * math.pi)
             add("Pine", p[0], p[1], yaw, scale)
             occupied.append((p[0], p[1], TREE_SPACING))
-            trunks.append((p[0], p[1]))
             wx, wz = ox + p[0], oz + p[1]
             self.colliders.append(VerticalCylinder((wx, wz), PINE_TRUNK_RADIUS * scale, -0.5, PINE_HEIGHT * scale))
             for y0, y1, r in PINE_FOLIAGE:
@@ -287,19 +258,6 @@ class ForestEnv:
             self.obstacles.append({"kind": "arbre", "model": "Pine", "center": (wx, 0.0, wz),
                                    "radius": PINE_TRUNK_RADIUS * scale, "height": PINE_HEIGHT * scale,
                                    "foliage_from": PINE_FOLIAGE[0][0] * scale})
-
-        # Décor sans collision
-        for name, (count, s0, s1) in DECOR.items():
-            for _ in range(count):
-                add(name, rng.uniform(-h, h), rng.uniform(-h, h), rng.uniform(0, 2 * math.pi), rng.uniform(s0, s1))
-        # Champignons au pied des arbres
-        for _ in range(60):
-            if not trunks:
-                break
-            tx, tz = rng.choice(trunks)
-            a, d = rng.uniform(0, 2 * math.pi), rng.uniform(0.8, 1.8)
-            add(rng.choice(MUSHROOMS), tx + d * math.cos(a), tz + d * math.sin(a),
-                rng.uniform(0, 2 * math.pi), rng.uniform(0.35, 0.7))
 
     def _build_vaos(self):
         prog = self.assets.prog
