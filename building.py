@@ -15,9 +15,7 @@ Toutes les parties solides sont décomposées en boîtes alignées sur les axes 
 assurant une détection de collision 100 % exacte et sans aucun polygone invisible bloquant le vol.
 """
 
-import math
 import numpy as np
-import moderngl
 from collision import Box
 
 # ---------------------------------------------------------------------------
@@ -327,6 +325,17 @@ def add_box_geometry(verts, idx, center, half, mat_id=MAT_CONCRETE):
                         base_idx, base_idx + 2, base_idx + 3))
 
 
+_PROGRAMS = {}
+
+
+def _building_program(ctx):
+    """Programme GLSL compilé une seule fois par contexte (partagé par bâtiment et murs)."""
+    if ctx not in _PROGRAMS:
+        _PROGRAMS[ctx] = ctx.program(vertex_shader=BUILDING_VERTEX_SHADER,
+                                     fragment_shader=BUILDING_FRAGMENT_SHADER)
+    return _PROGRAMS[ctx]
+
+
 class ProceduralBuilding:
     """Générateur et moteur de rendu du bâtiment industriel procédural.
 
@@ -343,8 +352,7 @@ class ProceduralBuilding:
     def __init__(self, ctx, origin=(0.0, 0.0, -12.0)):
         self.ctx = ctx
         self.origin = np.asarray(origin, dtype="f8")
-        self.prog = ctx.program(vertex_shader=BUILDING_VERTEX_SHADER,
-                                fragment_shader=BUILDING_FRAGMENT_SHADER)
+        self.prog = _building_program(ctx)
 
         self.colliders = []
         self.openings = []

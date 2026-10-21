@@ -17,8 +17,6 @@ terrain des ouvertures est disponible via get_openings().
 
 import random
 
-import numpy as np
-
 from building import (MAT_CONCRETE, MAT_METAL_SHEET, MAT_PLASTER, MAT_STONE, MAT_WOOD,
                       ProceduralBuilding, WallOpeningSpec)
 from collision import Box
@@ -162,5 +160,5 @@ class WallMaze(ProceduralBuilding):
         self._add_solid_box((xc, yc, z_back - t / 2.0), (hx, hy + t, t / 2.0), mat_id=mat)
 
     def release(self):
-        for obj in (self.vao, self.vbo, self.ibo, self.prog):
+        for obj in (self.vao, self.vbo, self.ibo):  # le programme est partagé (voir building.py)
             obj.release()

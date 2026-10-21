@@ -116,7 +116,6 @@ class MujocoFlight:
         self.model = mujoco.MjModel.from_xml_string(drone_mjcf(self.half, colliders))
         self.data = mujoco.MjData(self.model)
         self.bid = self.model.body("drone").id
-        self.hull = self.model.geom("hull").id
         self._init_controller()
         if old is not None:
             self.data.qpos[:], self.data.qvel[:] = old

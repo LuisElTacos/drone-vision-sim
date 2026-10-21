@@ -236,10 +236,6 @@ class ForestEnv:
         def add(name, x, z, yaw, scale):
             self.instances.setdefault(name, []).append(_instance_matrix(ox + x, oz + z, yaw, scale))
 
-        def rotate(lx, lz, yaw):
-            c, s = math.cos(yaw), math.sin(yaw)
-            return c * lx + s * lz, -s * lx + c * lz
-
         # Pins
         n_trees = int(self.tree_density * self.size * self.size)
         for _ in range(n_trees * 40):
