@@ -31,10 +31,11 @@ import moderngl
 import numpy as np
 
 from building import ProceduralBuilding
-from collision import Box, DroneBox, Ground, Sphere, move_with_collisions
+from collision import Box, Ground, Sphere
 from gltf_loader import bounds, load_glb
 from forest_env import ForestAssets, ForestEnv
 from ui_panel import PANEL_WIDTH, SidePanel
+from mujoco_flight import MujocoFlight
 from walls_env import WallMaze
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -53,6 +54,7 @@ STEREO_PAIRS = [
     ("Arrière-gauche", 240.0),
     ("Avant-gauche", 300.0),
 ]
+CAMERA_SETBACK = 0.03      # retrait des caméras derrière le bord du drone (m)
 SPLIT = "grid"             # vues en grille ("grid"), en colonnes ("side_by_side") ou en lignes ("stacked")
 WINDOW_SIZE = (1860, 800)  # panneau de 270 px + vues
 WORLD_CAMERA_POSITION = (12.0, 9.0, 6.0)   # caméra fixe du monde
@@ -100,7 +102,11 @@ def translation(x, y, z):
 
 
 class Camera:
-    """Caméra yaw/pitch. Repère monde : Y vers le haut."""
+    """Caméra yaw/pitch. Repère monde : Y vers le haut.
+
+    Si `rotation` est donnée (colonnes droite, haut, avant en repère monde), elle remplace
+    yaw/pitch : caméra fixée à un châssis qui s'incline (tangage et roulis).
+    """
 
     def __init__(self, position, yaw=-90.0, pitch=0.0, fovy=60.0, near=0.1):
         self.position = np.array(position, dtype="f4")
@@ -108,19 +114,31 @@ class Camera:
         self.pitch = pitch
         self.fovy = fovy
         self.near = near
+        self.rotation = None
 
     @property
     def forward(self):
+        if self.rotation is not None:
+            return self.rotation[:, 2].astype("f4")
         y, p = math.radians(self.yaw), math.radians(self.pitch)
         return np.array([math.cos(p) * math.cos(y), math.sin(p), math.cos(p) * math.sin(y)], dtype="f4")
 
     @property
     def right(self):
+        if self.rotation is not None:
+            return self.rotation[:, 0].astype("f4")
         r = np.cross(self.forward, np.array([0, 1, 0], dtype="f4"))
         return r / np.linalg.norm(r)
 
+    @property
+    def up(self):
+        if self.rotation is not None:
+            return self.rotation[:, 1].astype("f4")
+        return np.cross(self.right, self.forward)
+
     def view(self):
-        return look_at(self.position, self.position + self.forward, np.array([0, 1, 0], dtype="f4"))
+        up = self.rotation[:, 1] if self.rotation is not None else (0.0, 1.0, 0.0)
+        return look_at(self.position, self.position + self.forward, np.array(up, dtype="f4"))
 
     def projection(self, aspect):
         return perspective(self.fovy, aspect, self.near, 500.0)
@@ -450,12 +468,11 @@ class Scene:
 # ---------------------------------------------------------------------------
 
 class Drone:
-    """Drone avec dynamique de vol réaliste (modèle stabilisé type DJI) :
-    - Commande en vitesse (m/s) directement exploitable par un algo (A*) ou CNN
-    - Inertie et accélération maximale
-    - Inclinaison naturelle (tangage et roulis par platitude différentielle)
-    - Caméras frontales stéréo montées avec découplage du roulis/tangage pour préserver
-      la rectitude de la géométrie épipolaire.
+    """Drone commandé en vitesse (m/s, repère drone) et en vitesse de lacet.
+
+    La dynamique et les chocs sont calculés par MuJoCo (mujoco_flight.py : quadrotor à 4 moteurs,
+    contrôleur en cascade). Les caméras sont fixées au châssis (elles suivent tangage et roulis)
+    ou stabilisées (lacet seul).
     """
 
     def __init__(self, scene, position, yaw=-90.0):
@@ -467,13 +484,12 @@ class Drone:
         self.roll = 0.0                           # roulis châssis (degrés)
         self.camera_pitch = 0.0                   # inclinaison caméra (degrés)
         self.contact = False
-        self.last_acc = np.zeros(3, dtype="f8")
 
         parts = load_glb(DRONE_MODEL)
         lo, hi = bounds(parts)
         self.center_offset = (lo + hi) / 2.0           # centre de la boîte dans le repère modèle
         size = hi - lo                                 # (gauche-droite, hauteur, longueur)
-        self.box = DroneBox(size / 2.0)                # demi-dimensions (droite, haut, avant)
+        self.half = size / 2.0                         # demi-dimensions (droite, haut, avant)
         self.parts = [
             (scene.make_vao(v, i), tuple(max(c, 0.03) for c in color), scene.make_texture(tex_img) if tex_img else None)
             for v, i, color, tex_img in parts
@@ -481,7 +497,15 @@ class Drone:
 
         # Deux caméras (gauche, droite) par paire stéréo, dans l'ordre de STEREO_PAIRS.
         self.cameras = [Camera(position, fovy=CAMERA_FOVY, near=0.02) for _ in range(2 * len(STEREO_PAIRS))]
+        self.cams_on_chassis = True   # False : caméras stabilisées (lacet seul)
+        self.flight = MujocoFlight(self.half, scene.colliders, self.position, self.yaw)
+        self.flight_pos = self.position.copy()   # dernière position donnée par MuJoCo (détecte les téléportations)
         self.update_cameras()
+
+    def body_axes(self):
+        """Axes du châssis en repère monde : (avant, gauche, haut)."""
+        R = self.flight.rotation
+        return R[:, 0], R[:, 1], R[:, 2]
 
     @property
     def forward(self):
@@ -495,132 +519,70 @@ class Drone:
         return np.cross(self.forward, (0.0, 1.0, 0.0))
 
     def model_matrix(self):
-        """Repère modèle -> monde avec lacet (yaw), tangage (pitch) et roulis (roll)."""
-        fwd = self.forward
-        right = self.right
-        # Repère de base : +X modèle = gauche (-right), +Y = haut, +Z = avant
-        R0 = np.column_stack([-right, (0.0, 1.0, 0.0), fwd])
-
-        # Rotation tangage (autour de l'axe X du modèle) : pitch > 0 -> nez vers le bas
-        p = math.radians(self.pitch)
-        Rx = np.array([
-            [1.0, 0.0, 0.0],
-            [0.0, math.cos(p), -math.sin(p)],
-            [0.0, math.sin(p), math.cos(p)],
-        ])
-
-        # Rotation roulis (autour de l'axe Z du modèle) : roll > 0 -> inclinaison à droite
-        r = math.radians(self.roll)
-        Rz = np.array([
-            [math.cos(r), -math.sin(r), 0.0],
-            [math.sin(r), math.cos(r), 0.0],
-            [0.0, 0.0, 1.0],
-        ])
-
-        rot3 = R0 @ Rx @ Rz
+        """Repère modèle (+X gauche, +Y haut, +Z avant) -> monde, orientation complète du châssis."""
+        fwd, left, up = self.body_axes()
         rot4 = np.identity(4, dtype="f4")
-        rot4[:3, :3] = rot3
+        rot4[:3, :3] = np.column_stack([left, up, fwd])
         m = translation(*self.position) @ rot4 @ translation(*(-self.center_offset))
         return m.astype("f4")
 
     def update_cameras(self):
-        """Chaque paire est posée sur le bord de la boîte du drone dans sa direction,
-        ses deux caméras à ±baseline/2 de part et d'autre, parallèles (paire rectifiée)."""
-        hx, hz = self.box.half[0], self.box.half[2]
+        """Chaque paire est posée sur le bord de la boîte du drone dans sa direction (en retrait de
+        CAMERA_SETBACK pour rester dans la coque au contact d'un obstacle), ses deux caméras à
+        ±baseline/2 de part et d'autre, parallèles (paire rectifiée).
+
+        Fixées au châssis, les caméras suivent tangage et roulis ; stabilisées, le lacet seul."""
+        if self.cams_on_chassis:
+            fwd, left, up = self.body_axes()
+            right = -left
+        else:
+            fwd, right, up = self.forward, self.right, np.array([0.0, 1.0, 0.0])
+        hx, hz = self.half[0], self.half[2]
+        p = math.radians(self.camera_pitch)
         for k, (_, offset) in enumerate(STEREO_PAIRS):
             a = math.radians(offset)
             # direction de la paire dans le repère drone (avant, droite)
             df, dr = math.cos(a), math.sin(a)
             # distance du centre au bord de la boîte dans cette direction
             t = min(hz / abs(df) if abs(df) > 1e-9 else np.inf, hx / abs(dr) if abs(dr) > 1e-9 else np.inf)
-            direction = self.forward * df + self.right * dr
-            side_axis = np.cross(direction, (0.0, 1.0, 0.0))  # droite de la paire
-            mount = self.position + direction * t
+            direction = fwd * df + right * dr
+            side_axis = np.cross(direction, up)  # droite de la paire
+            cam_fwd = math.cos(p) * direction + math.sin(p) * up
+            cam_up = -math.sin(p) * direction + math.cos(p) * up
+            mount = self.position + direction * (t - CAMERA_SETBACK)
             for cam, side in zip(self.cameras[2 * k:2 * k + 2], (-0.5, 0.5)):  # gauche, droite
                 cam.position = (mount + side_axis * side * STEREO_BASELINE).astype("f4")
+                cam.rotation = np.column_stack([side_axis, cam_up, cam_fwd])
                 cam.yaw = self.yaw + offset
                 cam.pitch = self.camera_pitch
 
     def update(self, dt, cmd_velocity=None, cmd_yaw_rate=0.0):
-        """Met à jour la dynamique de vol du drone pour un pas dt.
+        """Avance la simulation de dt secondes.
 
-        cmd_velocity : vecteur [v_fwd, v_right, v_up] en m/s dans le repère drone.
+        cmd_velocity : vecteur [v_fwd, v_right, v_up] en m/s dans le repère drone (lacet seul).
         cmd_yaw_rate : vitesse angulaire en lacet (deg/s).
+        Retourne True si le drone touche un obstacle.
         """
-        if cmd_velocity is None:
-            cmd_velocity = np.zeros(3)
-        else:
-            cmd_velocity = np.asarray(cmd_velocity, dtype="f8")
-
-        v_fwd_cmd, v_right_cmd, v_up_cmd = cmd_velocity
+        v_fwd_cmd, v_right_cmd, v_up_cmd = np.zeros(3) if cmd_velocity is None else cmd_velocity
         # Vitesse désirée en repère monde
         v_target = (self.forward * v_fwd_cmd +
                     self.right * v_right_cmd +
                     np.array([0.0, v_up_cmd, 0.0]))
 
-        # Paramètres dynamiques (inertie + limites des moteurs)
-        tau = 0.22           # temps de réponse en vitesse (s)
-        target_h_norm = float(np.linalg.norm(v_target * np.array([1.0, 0.0, 1.0])))
-        a_max_horiz = max(10.0, target_h_norm * 1.8)
-        a_max_vert = max(8.0, abs(v_target[1]) * 1.8)
-
-        a_desired = (v_target - self.velocity) / tau
-        a_horiz = a_desired * np.array([1.0, 0.0, 1.0])
-        a_vert = a_desired[1]
-
-        norm_h = np.linalg.norm(a_horiz)
-        if norm_h > a_max_horiz:
-            a_horiz *= (a_max_horiz / norm_h)
-        a_vert = np.clip(a_vert, -a_max_vert, a_max_vert)
-
-        acc = np.array([a_horiz[0], a_vert, a_horiz[2]])
-        self.last_acc = acc
-        self.velocity += acc * dt
-
-        # Déplacement avec détection des collisions
-        displacement = self.velocity * dt
-        new_pos, hit = move_with_collisions(
-            self.position, displacement, self.forward, self.box, self.scene.colliders)
-
+        flight = self.flight
+        flight.sync_scene(self.scene.colliders)
+        if not np.allclose(self.position, self.flight_pos):
+            # Position changée de l'extérieur (téléportation, changement d'environnement)
+            flight.reset(self.position, self.yaw, self.velocity)
+        hit = flight.step(dt, v_target, cmd_yaw_rate)
+        self.position = flight.position
+        self.flight_pos = self.position.copy()
+        self.velocity = flight.velocity
+        self.yaw = flight.yaw_deg
+        fwd, left, _ = self.body_axes()
+        self.pitch = math.degrees(-math.asin(np.clip(fwd[1], -1.0, 1.0)))   # > 0 : nez vers le bas
+        self.roll = math.degrees(math.asin(np.clip(left[1], -1.0, 1.0)))    # > 0 : penché à droite
         self.contact = hit
-        if hit:
-            # En cas de choc, on adapte la vitesse au déplacement effectif
-            actual_vel = (new_pos - self.position) / max(dt, 1e-4)
-            self.velocity = actual_vel * 0.7
-
-        self.position = new_pos
-
-        # Mise à jour du lacet
-        self.yaw = (self.yaw + cmd_yaw_rate * dt) % 360.0
-
-        # Platitude différentielle : calcul des inclinaisons naturelles
-        a_fwd = float(np.dot(acc, self.forward))
-        a_right = float(np.dot(acc, self.right))
-        v_fwd = float(np.dot(self.velocity, self.forward))
-
-        # Virage coordonné (banked turn)
-        yaw_rate_rad = math.radians(cmd_yaw_rate)
-        turn_bank = (v_fwd * yaw_rate_rad) / 9.81 * 1.3
-
-        # Angles cibles bornés à ±25°
-        target_pitch = math.degrees(math.atan2(a_fwd, 9.81))
-        target_pitch = float(np.clip(target_pitch, -25.0, 25.0))
-
-        target_roll = math.degrees(math.atan2(a_right / 9.81 + turn_bank, 1.0))
-        target_roll = float(np.clip(target_roll, -25.0, 25.0))
-
-        # Lissage fluide des angles du châssis
-        filter_factor = 1.0 - math.exp(-dt / 0.10)
-        self.pitch += (target_pitch - self.pitch) * filter_factor
-        self.roll += (target_roll - self.roll) * filter_factor
-
-        self.update_cameras()
-        return hit
-
-    def move(self, displacement):
-        """Compatibilité avec l'ancien appel direct."""
-        self.position, hit = move_with_collisions(
-            self.position, displacement, self.forward, self.box, self.scene.colliders)
         self.update_cameras()
         return hit
 
@@ -768,6 +730,7 @@ def main():
         "regen_forest": False,     # bouton « Nouvelle forêt »
         "forest_spawn": None,
         "forest_info": [],
+        "cams_on_chassis": drone.cams_on_chassis,  # False : caméras stabilisées
     }
     last_mode = start_mode
 
@@ -965,6 +928,8 @@ def main():
             drone.yaw, drone.pitch, drone.roll = float(t_yaw), 0.0, 0.0
             drone.update_cameras()
 
+        drone.cams_on_chassis = bool(settings["cams_on_chassis"])
+
         # Vecteur de consigne de vitesse [m/s]
         v_cmd = np.array([cmd_fwd * max_h, cmd_right * max_h, cmd_up * max_v])
 
@@ -984,7 +949,8 @@ def main():
             ctx.clear(0.12, 0.12, 0.12)
             panel_px = round(PANEL_WIDTH * w / max(ww, 1))
             active = [v for v in views if v[1]]
-            drone_items = drone.render_items() + scene.target_items()
+            target_items = scene.target_items()
+            drone_items = drone.render_items() + target_items
             tiles = tile_viewports(panel_px, w - panel_px, h, len(active))
             for (_, _, cam), vp in zip(active, tiles):
                 ctx.viewport = vp

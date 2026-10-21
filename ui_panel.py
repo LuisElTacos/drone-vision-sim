@@ -91,6 +91,12 @@ class SidePanel:
 
             imgui.spacing()
             imgui.separator()
+            imgui.text("Caméras")
+            _, settings["cams_on_chassis"] = imgui.checkbox(
+                "Fixées au châssis", settings.get("cams_on_chassis", True))
+
+            imgui.spacing()
+            imgui.separator()
             imgui.text("Contrôles")
             _, settings["gamepad_enabled"] = imgui.checkbox("Piloter à la manette", settings.get("gamepad_enabled", False))
             if settings.get("gamepad_connected", False):

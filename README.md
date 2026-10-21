@@ -48,7 +48,8 @@ Le panneau de gauche permet de choisir les vues (caméra gauche, caméra droite,
 | `building.py` | bâtiment procédural et ses collisions |
 | `walls_env.py` | environnement « murs troués » |
 | `forest_env.py` | environnement « forêt » (rendu instancié) |
-| `collision.py` | collisions du drone (sol, sphères, boîtes) |
+| `collision.py` | formes de collision des environnements (converties pour MuJoCo) |
+| `mujoco_flight.py` | dynamique de vol par MuJoCo : quadrotor, contrôleur en cascade |
 | `gltf_loader.py` | chargeur GLB |
 | `ui_panel.py` | panneau latéral ImGui |
 | `Docs/Approche_vision_drone.md` | approche vision détaillée |

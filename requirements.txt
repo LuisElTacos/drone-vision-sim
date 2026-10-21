@@ -3,3 +3,4 @@ glfw
 numpy
 pillow
 imgui-bundle
+mujoco
