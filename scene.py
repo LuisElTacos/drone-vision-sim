@@ -1,9 +1,10 @@
-"""Scène de test moderngl : un drone (DJI Avata 2) muni de deux caméras frontales
-(gauche / droite) dans une scène avec un sol, une sphère et un mur percé.
+"""Scène de test moderngl : un drone (DJI Avata 2) muni de 12 caméras, soit 6 paires
+stéréo réparties tous les 60° pour voir à 360° (voir STEREO_PAIRS), dans une scène
+avec un sol, un bâtiment procédural, une sphère et un mur percé.
 
-Un panneau latéral permet de cocher les vues affichées : caméra 1 (gauche),
-caméra 2 (droite), caméra fixe placée dans le monde, caméra de suivi. Les vues
-cochées se partagent le reste de la fenêtre. Les collisions drone / obstacles
+Un panneau latéral permet de cocher les vues affichées : les 12 caméras du drone,
+la caméra fixe placée dans le monde, la caméra de suivi. Les vues cochées se
+partagent le reste de la fenêtre en grille. Les collisions drone / obstacles
 sont gérées (voir collision.py).
 
 Installation : pip install -r requirements.txt
@@ -35,10 +36,21 @@ from ui_panel import PANEL_WIDTH, SidePanel
 HERE = os.path.dirname(os.path.abspath(__file__))
 DRONE_MODEL = os.path.join(HERE, "Assets", "models", "DJI_Avata2_Sketchfab.glb")
 
-STEREO_BASELINE = 0.18     # distance entre les deux caméras (m)
+STEREO_BASELINE = 0.18     # distance entre les deux caméras d'une paire (m)
 CAMERA_FOVY = 60.0         # champ vertical des caméras du drone (degrés)
-SPLIT = "side_by_side"     # vues en colonnes ("side_by_side") ou en lignes ("stacked")
-WINDOW_SIZE = (1860, 600)  # panneau de 270 px + vues
+# Paires stéréo réparties autour du drone : (nom, lacet relatif en degrés, + vers la droite).
+# Avec fovy 60° en 4:3, chaque caméra voit ~75° en horizontal : 6 paires espacées de 60°
+# couvrent les 360° avec du recouvrement entre paires voisines.
+STEREO_PAIRS = [
+    ("Avant", 0.0),
+    ("Avant-droite", 60.0),
+    ("Arrière-droite", 120.0),
+    ("Arrière", 180.0),
+    ("Arrière-gauche", 240.0),
+    ("Avant-gauche", 300.0),
+]
+SPLIT = "grid"             # vues en grille ("grid"), en colonnes ("side_by_side") ou en lignes ("stacked")
+WINDOW_SIZE = (1860, 800)  # panneau de 270 px + vues
 WORLD_CAMERA_POSITION = (12.0, 9.0, 6.0)   # caméra fixe du monde
 WORLD_CAMERA_TARGET = (0.0, 3.0, -10.0)
 
@@ -398,7 +410,8 @@ class Drone:
             for v, i, color, tex_img in parts
         ]
 
-        self.cameras = [Camera(position, fovy=CAMERA_FOVY, near=0.02) for _ in range(2)]
+        # Deux caméras (gauche, droite) par paire stéréo, dans l'ordre de STEREO_PAIRS.
+        self.cameras = [Camera(position, fovy=CAMERA_FOVY, near=0.02) for _ in range(2 * len(STEREO_PAIRS))]
         self.update_cameras()
 
     @property
@@ -442,12 +455,22 @@ class Drone:
         return m.astype("f4")
 
     def update_cameras(self):
-        """Les caméras sont sur la face avant, à ±baseline/2 du centre."""
-        front = self.position + self.forward * self.box.half[2]
-        for cam, side in zip(self.cameras, (-0.5, 0.5)):  # gauche, droite
-            cam.position = (front + self.right * side * STEREO_BASELINE).astype("f4")
-            cam.yaw = self.yaw
-            cam.pitch = self.camera_pitch
+        """Chaque paire est posée sur le bord de la boîte du drone dans sa direction,
+        ses deux caméras à ±baseline/2 de part et d'autre, parallèles (paire rectifiée)."""
+        hx, hz = self.box.half[0], self.box.half[2]
+        for k, (_, offset) in enumerate(STEREO_PAIRS):
+            a = math.radians(offset)
+            # direction de la paire dans le repère drone (avant, droite)
+            df, dr = math.cos(a), math.sin(a)
+            # distance du centre au bord de la boîte dans cette direction
+            t = min(hz / abs(df) if abs(df) > 1e-9 else np.inf, hx / abs(dr) if abs(dr) > 1e-9 else np.inf)
+            direction = self.forward * df + self.right * dr
+            side_axis = np.cross(direction, (0.0, 1.0, 0.0))  # droite de la paire
+            mount = self.position + direction * t
+            for cam, side in zip(self.cameras[2 * k:2 * k + 2], (-0.5, 0.5)):  # gauche, droite
+                cam.position = (mount + side_axis * side * STEREO_BASELINE).astype("f4")
+                cam.yaw = self.yaw + offset
+                cam.pitch = self.camera_pitch
 
     def update(self, dt, cmd_velocity=None, cmd_yaw_rate=0.0):
         """Met à jour la dynamique de vol du drone pour un pas dt.
@@ -613,9 +636,17 @@ def read_gamepad():
 # ---------------------------------------------------------------------------
 
 def tile_viewports(x0, w, h, n):
-    """Découpe la zone [x0, x0 + w] x [0, h] en n vues (colonnes ou lignes selon SPLIT)."""
+    """Découpe la zone [x0, x0 + w] x [0, h] en n vues (grille, colonnes ou lignes selon SPLIT)."""
     if n == 0:
         return []
+    if SPLIT == "grid":
+        # nombre de colonnes choisi pour des vues proches du 4:3
+        cols = max(1, min(n, round(math.sqrt(n * (w / h) / (4.0 / 3.0)))))
+        rows = math.ceil(n / cols)
+        xs = [round(w * c / cols) for c in range(cols + 1)]
+        ys = [round(h * r / rows) for r in range(rows + 1)]
+        return [(x0 + xs[i % cols], h - ys[i // cols + 1], xs[i % cols + 1] - xs[i % cols],
+                 ys[i // cols + 1] - ys[i // cols]) for i in range(n)]
     if SPLIT == "stacked":
         edges = [round(h * k / n) for k in range(n + 1)]
         return [(x0, h - edges[k + 1], w, edges[k + 1] - edges[k]) for k in range(n)]
@@ -656,12 +687,13 @@ def main():
     }
 
     # [libellé, actif, caméra] : l'ordre est celui d'affichage, de gauche à droite.
-    views = [
-        ["Caméra 1 (gauche)", True, drone.cameras[0]],
-        ["Caméra 2 (droite)", True, drone.cameras[1]],
-        ["Caméra fixe (monde)", True, LookAtCamera(WORLD_CAMERA_POSITION, WORLD_CAMERA_TARGET)],
-        ["Caméra de suivi", False, ChaseCamera(drone)],
-    ]
+    views = []
+    for k, (name, _) in enumerate(STEREO_PAIRS):
+        views.append([f"{name} G", True, drone.cameras[2 * k]])
+        views.append([f"{name} D", True, drone.cameras[2 * k + 1]])
+    chase_view = ["Caméra de suivi", False, ChaseCamera(drone)]
+    views += [["Caméra fixe (monde)", True, LookAtCamera(WORLD_CAMERA_POSITION, WORLD_CAMERA_TARGET)], chase_view]
+    onboard = set(id(c) for c in drone.cameras)
 
     state = {"captured": False, "last": None, "mouse_yaw_delta": 0.0}
 
@@ -685,7 +717,7 @@ def main():
             else:
                 glfw.set_window_should_close(win, True)
         if key == glfw.KEY_TAB and action == glfw.PRESS:
-            views[3][1] = not views[3][1]
+            chase_view[1] = not chase_view[1]
 
     def on_cursor(win, x, y):
         panel.mouse_pos(x, y)
@@ -825,12 +857,16 @@ def main():
             for (_, _, cam), vp in zip(active, tiles):
                 ctx.viewport = vp
                 ctx.clear(0.55, 0.7, 0.9, viewport=vp)
-                scene.render(cam, vp[2] / vp[3], extra=drone_items, building_mode=b_mode)
-            # traits de séparation entre les vues
+                # Le drone n'est pas dessiné dans ses propres caméras (images propres pour la vision).
+                extra = () if id(cam) in onboard else drone_items
+                scene.render(cam, vp[2] / vp[3], extra=extra, building_mode=b_mode)
+            # traits de séparation : bord gauche et bas de chaque vue
             ctx.viewport = (0, 0, w, h)
-            for vp in tiles[1:]:
-                sep = (vp[0] - 1, 0, 2, h) if SPLIT != "stacked" else (panel_px, vp[1] + vp[3] - 1, w - panel_px, 2)
-                ctx.clear(0.05, 0.05, 0.05, viewport=sep)
+            for vp in tiles:
+                if vp[0] > panel_px:
+                    ctx.clear(0.05, 0.05, 0.05, viewport=(vp[0] - 1, vp[1], 2, vp[3]))
+                if vp[1] > 0:
+                    ctx.clear(0.05, 0.05, 0.05, viewport=(vp[0], vp[1] - 1, vp[2], 2))
 
             x, y, z = drone.position
             speed_kmh = float(np.linalg.norm(drone.velocity)) * 3.6
@@ -842,6 +878,7 @@ def main():
                 f"Roulis   : {drone.roll:5.1f} deg",
                 f"Cam. inc.: {drone.camera_pitch:5.1f} deg",
                 f"Base st. : {STEREO_BASELINE * 100:.0f} cm",
+                f"Caméras  : {len(drone.cameras)} ({len(STEREO_PAIRS)} paires)",
                 "Contact  : OUI" if drone.contact else "Contact  : non",
                 "",
                 "Clic vue : capturer souris",
