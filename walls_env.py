@@ -1,4 +1,4 @@
-"""Environnement « murs troués » : une suite de murs unis percés de trous.
+"""Environnement « murs troués » : une suite de murs percés de trous, chacun avec sa texture.
 
 Le drone part devant le premier mur, la cible est derrière le dernier. Chaque mur
 contient plusieurs ouvertures de types différents :
@@ -19,8 +19,14 @@ import random
 
 import numpy as np
 
-from building import MAT_PLAIN, ProceduralBuilding, WallOpeningSpec
+from building import (MAT_CONCRETE, MAT_METAL_SHEET, MAT_PLASTER, MAT_STONE, MAT_WOOD,
+                      ProceduralBuilding, WallOpeningSpec)
 from collision import Box
+
+
+# Textures tirées pour les murs successifs (deux murs voisins n'ont jamais la même)
+WALL_MATERIALS = (MAT_PLASTER, MAT_WOOD, MAT_METAL_SHEET, MAT_STONE, MAT_CONCRETE)
+ENCLOSURE_MATERIAL = MAT_CONCRETE
 
 
 class WallMaze(ProceduralBuilding):
@@ -64,13 +70,17 @@ class WallMaze(ProceduralBuilding):
 
     def _build_geometry(self):
         rng = random.Random(self.seed)
+        mat_rng = random.Random(self.seed + 1000)  # séparé : ne change pas la disposition des trous
         half_w, H, T = self.width / 2.0, self.height, self.thickness
         slot_w = self.width / self.n_slots
         z_start, z_end = 4.0, -(self.n_walls + 1) * self.spacing
 
         prev_passage_slot = None
+        prev_mat = None
         for k in range(self.n_walls):
             z = -(k + 1) * self.spacing
+            mat = mat_rng.choice([m for m in WALL_MATERIALS if m != prev_mat])
+            prev_mat = mat
             slots = list(range(self.n_slots))
             rng.shuffle(slots)
             passage_slot = next(s for s in slots if s != prev_passage_slot)
@@ -101,12 +111,12 @@ class WallMaze(ProceduralBuilding):
                     dead_ends[name] = rng.uniform(1.5, min(3.0, self.spacing - T - 1.5))
 
             first = len(self.openings)
-            self._build_wall_x(-half_w, half_w, z, 0.0, H, thickness=T, openings=specs, default_mat=MAT_PLAIN)
+            self._build_wall_x(-half_w, half_w, z, 0.0, H, thickness=T, openings=specs, default_mat=mat)
 
             # Poches des culs-de-sac et vérité terrain
             for spec in specs:
                 if spec.name in dead_ends:
-                    self._build_pocket(spec, z, dead_ends[spec.name])
+                    self._build_pocket(spec, z, dead_ends[spec.name], mat)
             for info in self.openings[first:]:
                 if info.name in dead_ends:
                     info.is_niche, info.passable = True, False
@@ -124,9 +134,9 @@ class WallMaze(ProceduralBuilding):
         zc = (z_start + z_end) / 2.0
         for side in (-1.0, 1.0):
             self._add_solid_box((side * (half_w + T / 2.0), H / 2.0, zc), (T / 2.0, H / 2.0, length / 2.0 + T),
-                                mat_id=MAT_PLAIN)
+                                mat_id=ENCLOSURE_MATERIAL)
         for zw in (z_start, z_end):
-            self._add_solid_box((0.0, H / 2.0, zw), (half_w, H / 2.0, T / 2.0), mat_id=MAT_PLAIN)
+            self._add_solid_box((0.0, H / 2.0, zw), (half_w, H / 2.0, T / 2.0), mat_id=ENCLOSURE_MATERIAL)
 
         # Plafond invisible (collision seule) : pas de passage par-dessus les murs
         self.colliders.append(Box(self.origin + (0.0, H + 0.5, zc), (half_w + 1.0, 0.5, length / 2.0 + 1.0)))
@@ -135,7 +145,7 @@ class WallMaze(ProceduralBuilding):
         self.target = self.origin + (rng.uniform(-half_w + 2.0, half_w - 2.0), rng.uniform(1.0, 3.0),
                                      -(self.n_walls + 0.5) * self.spacing)
 
-    def _build_pocket(self, spec, z_wall, depth, margin=0.3, t=0.2):
+    def _build_pocket(self, spec, z_wall, depth, mat, margin=0.3, t=0.2):
         """Boîte fermée derrière l'ouverture : gauche, droite, haut, fond, et bas si surélevée."""
         x0, x1 = spec.u_min - margin, spec.u_max + margin
         y0, y1 = max(spec.v_min - margin, 0.0), spec.v_max + margin
@@ -144,12 +154,12 @@ class WallMaze(ProceduralBuilding):
         zc, hz = (z_front + z_back) / 2.0, depth / 2.0
         xc, hx = (x0 + x1) / 2.0, (x1 - x0) / 2.0 + t
         yc, hy = (y0 + y1) / 2.0, (y1 - y0) / 2.0
-        self._add_solid_box((x0 - t / 2.0, yc, zc), (t / 2.0, hy + t, hz), mat_id=MAT_PLAIN)
-        self._add_solid_box((x1 + t / 2.0, yc, zc), (t / 2.0, hy + t, hz), mat_id=MAT_PLAIN)
-        self._add_solid_box((xc, y1 + t / 2.0, zc), (hx, t / 2.0, hz), mat_id=MAT_PLAIN)
+        self._add_solid_box((x0 - t / 2.0, yc, zc), (t / 2.0, hy + t, hz), mat_id=mat)
+        self._add_solid_box((x1 + t / 2.0, yc, zc), (t / 2.0, hy + t, hz), mat_id=mat)
+        self._add_solid_box((xc, y1 + t / 2.0, zc), (hx, t / 2.0, hz), mat_id=mat)
         if y0 > 0.0:
-            self._add_solid_box((xc, y0 - t / 2.0, zc), (hx, t / 2.0, hz), mat_id=MAT_PLAIN)
-        self._add_solid_box((xc, yc, z_back - t / 2.0), (hx, hy + t, t / 2.0), mat_id=MAT_PLAIN)
+            self._add_solid_box((xc, y0 - t / 2.0, zc), (hx, t / 2.0, hz), mat_id=mat)
+        self._add_solid_box((xc, yc, z_back - t / 2.0), (hx, hy + t, t / 2.0), mat_id=mat)
 
     def release(self):
         for obj in (self.vao, self.vbo, self.ibo, self.prog):

@@ -29,7 +29,11 @@ MAT_STEEL_YELLOW = 2.0   # Zébrures de sécurité jaunes et noires (portail pri
 MAT_FLOOR = 3.0          # Dalle béton lissée avec joints de dilatation
 MAT_ROOF = 4.0           # Toiture industrielle étanche / bac acier
 MAT_INTERIOR_WALL = 5.0  # Parpaings peints clairs pour murs intérieurs
-MAT_PLAIN = 6.0          # Enduit uni sans texture (environnement « murs troués »)
+# Matériaux de l'environnement « murs troués » (un par mur, voir walls_env.py)
+MAT_PLASTER = 6.0        # Enduit clair avec nuances
+MAT_WOOD = 7.0           # Bardage en planches de bois
+MAT_METAL_SHEET = 8.0    # Tôle ondulée peinte
+MAT_STONE = 9.0          # Dalles de grès
 
 # ---------------------------------------------------------------------------
 # Shaders GLSL 330
@@ -174,10 +178,48 @@ void main() {
         vec3 wall_col = vec3(0.72 + rnd, 0.73 + rnd, 0.70 + rnd);
         base = mix(wall_col, vec3(0.48, 0.48, 0.46), is_mortar);
         spec = pow(max(dot(n, h), 0.0), 16.0) * 0.10;
-    } else {
-        // MAT 6: Enduit uni, sans texture
-        base = vec3(0.78, 0.74, 0.68);
+    } else if (v_mat < 6.5) {
+        // MAT 6: Enduit clair avec nuances douces
+        float blot = noise(coord * 1.3) * 0.6 + noise(coord * 4.0) * 0.4;
+        float grain = (noise(coord * 45.0) - 0.5) * 0.05;
+        base = vec3(0.82, 0.77, 0.68) * (0.88 + 0.18 * blot) + vec3(grain);
         spec = pow(max(dot(n, h), 0.0), 12.0) * 0.05;
+    } else if (v_mat < 7.5) {
+        // MAT 7: Planches de bois horizontales (18 cm)
+        float ph = 0.18;
+        float plank = floor(coord.y / ph);
+        float fy = fract(coord.y / ph);
+        float shift = hash(vec2(plank, 7.0)) * 3.0;
+        float rings = sin((coord.x + shift) * 6.0 + noise(vec2(coord.x * 1.5, coord.y * 25.0)) * 6.0);
+        vec3 wood = vec3(0.52, 0.35, 0.20) * (0.80 + 0.30 * hash(vec2(plank, 1.0)));
+        wood *= 0.92 + 0.08 * rings;
+        float gap = step(fy, 0.05);
+        base = mix(wood, vec3(0.16, 0.10, 0.06), gap);
+        spec = pow(max(dot(n, h), 0.0), 20.0) * 0.08;
+    } else if (v_mat < 8.5) {
+        // MAT 8: Tôle ondulée peinte, panneaux de 1 m, quelques traces de rouille
+        float rib = abs(fract(coord.x * 5.0) - 0.5) * 2.0;
+        float shade = 0.80 + 0.20 * rib;
+        float seam = step(0.985, fract(coord.y * 1.0));
+        float rust = smoothstep(0.62, 0.80, noise(coord * 3.0) * 0.7 + noise(coord * 12.0) * 0.3);
+        vec3 paint = vec3(0.30, 0.43, 0.55) * shade;
+        base = mix(paint, vec3(0.45, 0.25, 0.12), rust * 0.7);
+        base = mix(base, vec3(0.12), seam);
+        spec = pow(max(dot(n, h), 0.0), 40.0) * 0.30;
+    } else {
+        // MAT 9: Dalles de grès 60 x 40 cm en quinconce
+        float tw = 0.60;
+        float th = 0.40;
+        float row = floor(coord.y / th);
+        vec2 tcoord = vec2(coord.x + mod(row, 2.0) * tw * 0.5, coord.y);
+        vec2 tid = floor(tcoord / vec2(tw, th));
+        vec2 f = fract(tcoord / vec2(tw, th));
+        float joint = clamp(step(f.x, 0.02) + step(f.y, 0.03), 0.0, 1.0);
+        float r = hash(tid);
+        float grain = (noise(coord * 25.0) - 0.5) * 0.10 + (noise(coord * 6.0) - 0.5) * 0.08;
+        vec3 stone = vec3(0.72 + 0.10 * r, 0.62 + 0.08 * r, 0.45 + 0.06 * r) + vec3(grain);  // grès
+        base = mix(stone, vec3(0.28, 0.27, 0.25), joint);
+        spec = pow(max(dot(n, h), 0.0), 16.0) * 0.08;
     }
 
     // Éclairage hémisphérique ciel/sol + illumination intérieure de rebond

@@ -22,7 +22,7 @@ Options : `--env murs|batiment|vide` choisit l'environnement de départ (par dé
 
 ## Environnements
 
-- **Murs troués** (`walls_env.py`) : murs unis successifs percés de passages, de culs-de-sac (poches fermées) et d'ouvertures trop étroites. Un chemin vers la cible (sphère verte) est garanti, un plafond invisible empêche de passer par-dessus. Généré à partir d'une graine ; vérité terrain des ouvertures via `get_openings()`. Bouton « Nouveaux murs » dans le panneau.
+- **Murs troués** (`walls_env.py`) : murs successifs (une texture différente par mur : enduit, bois, tôle, pierre, parpaings) percés de passages, de culs-de-sac (poches fermées) et d'ouvertures trop étroites. Un chemin vers la cible (sphère verte) est garanti, un plafond invisible empêche de passer par-dessus. Généré à partir d'une graine ; vérité terrain des ouvertures via `get_openings()`. Bouton « Nouveaux murs » dans le panneau.
 - **Bâtiment** (`building.py`) : bâtiment industriel procédural pour le vol intérieur.
 - **Vide** : sol seul.
 
