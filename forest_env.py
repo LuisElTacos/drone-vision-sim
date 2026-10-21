@@ -4,10 +4,10 @@
 - Arbres : pin du projet C++ de 2A, préparé par tools/prepare_pine.py (branches retirées,
   pas de feuillage en bas : fût dégagé sur environ le tiers inférieur), répartis
   aléatoirement avec une distance minimale entre troncs.
-- Décor du pack Stylized Nature MegaKit (Quaternius, CC0) : rochers, fougères, herbes,
-  champignons, cailloux, plantes et fleurs.
-- Collisions : cylindre vertical par tronc, deux cylindres pour le feuillage, boîte par
-  rocher. Herbes, fleurs, fougères, cailloux : pas de collision.
+- Décor du pack Stylized Nature MegaKit (Quaternius, CC0) : fougères, champignons,
+  plantes, trèfle et fleurs (ni herbe, ni cailloux, ni rochers).
+- Collisions : cylindre vertical par tronc, deux cylindres pour le feuillage. Le décor
+  au sol n'a pas de collision.
 - Départ en bordure sud, cible (coordonnée connue) en bordure nord.
 
 Tout est tiré à partir d'une graine. Les modèles et textures sont chargés une seule
@@ -21,7 +21,7 @@ import random
 import moderngl
 import numpy as np
 
-from collision import Box, Sphere, VerticalCylinder
+from collision import VerticalCylinder
 from gltf_loader import load_gltf
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -109,15 +109,11 @@ PINE_TRUNK_RADIUS = 0.13         # rayon du fût vers 0,5 (au-dessus de l'évase
 PINE_HEIGHT = 3.9
 PINE_FOLIAGE = [(1.3, 2.3, 1.0), (2.3, 3.9, 0.6)]  # (y min, y max, rayon) des cylindres de feuillage
 TREE_SPACING = 1.6               # demi-distance minimale entre deux troncs (m)
-ROCKS = ["Rock_Medium_1", "Rock_Medium_2", "Rock_Medium_3"]
 DECOR = {  # nom : (nombre, échelle min, échelle max) ; sans collision (les modèles du pack sont ~2x trop grands)
     "Fern_1": (60, 0.6, 1.0),
-    "Grass_Common_Short": (260, 0.35, 0.55), "Grass_Common_Tall": (140, 0.3, 0.45),
-    "Grass_Wispy_Short": (160, 0.35, 0.55), "Grass_Wispy_Tall": (90, 0.3, 0.45),
     "Plant_1": (35, 0.5, 0.8), "Plant_7": (35, 0.6, 1.0),
     "Clover_1": (60, 0.25, 0.4), "Clover_2": (60, 0.25, 0.4),
     "Flower_3_Group": (30, 0.25, 0.4), "Flower_4_Group": (30, 0.25, 0.4),
-    "Pebble_Round_1": (25, 1.0, 2.0), "Pebble_Round_2": (25, 1.0, 2.0), "Pebble_Round_3": (25, 1.0, 2.0),
 }
 MUSHROOMS = ["Mushroom_Common", "Mushroom_Laetiporus"]
 
@@ -139,7 +135,7 @@ class ForestAssets:
         self.prog = ctx.program(vertex_shader=FOREST_VERTEX_SHADER, fragment_shader=FOREST_FRAGMENT_SHADER)
         self.textures = {}
         self.models = {}  # nom -> {"prims": [...], "bbox": (lo, hi), "trunk": ..., "leaves": ...}
-        names = set(ROCKS) | set(DECOR) | set(MUSHROOMS)
+        names = set(DECOR) | set(MUSHROOMS)
         for name in sorted(names):
             self.models[name] = self._load(name)
         self.models["Pine"] = self._load_pine()
@@ -228,7 +224,7 @@ class ForestEnv:
         self.size = size
         self.tree_density = tree_density
         self.colliders = []
-        self.obstacles = []  # vérité terrain : arbres et rochers
+        self.obstacles = []  # vérité terrain : arbres
         self.instances = {}  # nom -> liste de matrices 4x4
         self._generate()
         self._build_vaos()
@@ -246,7 +242,7 @@ class ForestEnv:
 
     def summary(self):
         kinds = [o["kind"] for o in self.obstacles]
-        return {k: kinds.count(k) for k in ("arbre", "rocher")}
+        return {k: kinds.count(k) for k in ("arbre",)}
 
     # --- génération -------------------------------------------------------------
 
@@ -291,27 +287,6 @@ class ForestEnv:
             self.obstacles.append({"kind": "arbre", "model": "Pine", "center": (wx, 0.0, wz),
                                    "radius": PINE_TRUNK_RADIUS * scale, "height": PINE_HEIGHT * scale,
                                    "foliage_from": PINE_FOLIAGE[0][0] * scale})
-
-        # Rochers (boîte englobante de la roche tournée)
-        for _ in range(400):
-            if sum(1 for o in self.obstacles if o["kind"] == "rocher") >= 20:
-                break
-            name = rng.choice(ROCKS)
-            scale, yaw = rng.uniform(0.35, 1.0), rng.uniform(0, 2 * math.pi)
-            lo, hi = self.assets.models[name]["bbox"]
-            p = np.array([rng.uniform(-h, h), rng.uniform(-h, h)])
-            r = scale * 0.5 * max(hi[0] - lo[0], hi[2] - lo[2])
-            if not is_free(p, r):
-                continue
-            add(name, p[0], p[1], yaw, scale)
-            occupied.append((p[0], p[1], r))
-            corners = np.array([[x, z] for x in (lo[0], hi[0]) for z in (lo[2], hi[2])]) * scale
-            rc = np.array([rotate(x, z, yaw) for x, z in corners])
-            cmin, cmax = rc.min(axis=0) + p, rc.max(axis=0) + p
-            center = (ox + (cmin[0] + cmax[0]) / 2.0, scale * (lo[1] + hi[1]) / 2.0, oz + (cmin[1] + cmax[1]) / 2.0)
-            half = ((cmax[0] - cmin[0]) / 2.0, scale * (hi[1] - lo[1]) / 2.0, (cmax[1] - cmin[1]) / 2.0)
-            self.colliders.append(Box(center, half))
-            self.obstacles.append({"kind": "rocher", "model": name, "center": center, "half": half})
 
         # Décor sans collision
         for name, (count, s0, s1) in DECOR.items():

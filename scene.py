@@ -799,7 +799,7 @@ def main():
         settings["forest_spawn"] = forest.spawn
         settings["forest_info"] = [
             f"Graine : {forest.seed}",
-            f"{counts['arbre']} pins, {counts['rocher']} rochers",
+            f"{counts['arbre']} pins",
         ]
 
     update_env_info()
