@@ -23,7 +23,7 @@ Options : `--env murs|foret|batiment|vide` choisit l'environnement de départ (p
 ## Environnements
 
 - **Murs troués** (`walls_env.py`) : murs successifs (une texture différente par mur : enduit, bois, tôle, pierre, parpaings) percés de passages, de culs-de-sac (poches fermées) et d'ouvertures trop étroites. Un chemin vers la cible (sphère verte) est garanti, un plafond invisible empêche de passer par-dessus. Généré à partir d'une graine ; vérité terrain des ouvertures via `get_openings()`. Bouton « Nouveaux murs » dans le panneau.
-- **Forêt** (`forest_env.py`) : forêt dense de pins à tronc droit (environ 165 pins de 11 à 14 m sur 50 × 50 m, fût dégagé sur le tiers inférieur) sur un sol procédural, dessinée en instanciation. Le pin vient du projet C++ de 2A, préparé par `tools/prepare_pine.py` (branches retirées, feuillage bas coupé) dans `Assets/models/pine/`. Collisions : cylindre par tronc, deux cylindres pour le feuillage. Bouton « Nouvelle forêt » dans le panneau.
+- **Forêt** (`forest_env.py`) : forêt dense de pins à tronc droit (environ 165 pins de 11 à 14 m sur 50 × 50 m, aiguilles à partir de 22 % de la hauteur) sur un sol procédural, dessinée en instanciation. Le pin est le modèle « fir_spruce » téléchargé, préparé par `tools/prepare_pine.py` (Blender en ligne de commande : objet des branches supprimé, il reste le fût et les cartes d'aiguilles) dans `Assets/models/pine/`. Collisions : cylindre par tronc, deux cylindres pour le feuillage. Bouton « Nouvelle forêt » dans le panneau.
 - **Bâtiment** (`building.py`) : bâtiment industriel procédural pour le vol intérieur.
 - **Vide** : sol seul.
 

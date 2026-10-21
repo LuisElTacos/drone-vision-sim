@@ -1,9 +1,9 @@
 """Environnement « forêt » : forêt dense de pins à tronc droit, dessinée en instanciation
 (un seul appel de rendu par modèle).
 
-- Arbres : pin du projet C++ de 2A, préparé par tools/prepare_pine.py (branches retirées,
-  pas de feuillage en bas : fût dégagé sur environ le tiers inférieur), répartis
-  aléatoirement avec une distance minimale entre troncs.
+- Arbres : pin « fir_spruce » téléchargé, préparé par tools/prepare_pine.py (objet des
+  branches supprimé, il reste le fût et les cartes d'aiguilles, qui commencent vers 22 %
+  de la hauteur), répartis aléatoirement avec une distance minimale entre troncs.
 - Sol forestier procédural (terre et mousse), sans autre décor.
 - Collisions : cylindre vertical par tronc, deux cylindres pour le feuillage.
 - Départ en bordure sud, cible (coordonnée connue) en bordure nord.
@@ -99,11 +99,11 @@ void main() {
 }
 """
 
-# Pin (unités du modèle : hauteur 3,9) : échelle tirée, rayon du fût et volumes du feuillage
-PINE_SCALE = (2.8, 3.6)          # soit 11 à 14 m de haut
-PINE_TRUNK_RADIUS = 0.13         # rayon du fût vers 0,5 (au-dessus de l'évasement des racines)
-PINE_HEIGHT = 3.9
-PINE_FOLIAGE = [(1.3, 2.3, 1.0), (2.3, 3.9, 0.6)]  # (y min, y max, rayon) des cylindres de feuillage
+# Pin normalisé à une hauteur de 1 (voir tools/prepare_pine.py) : échelle = hauteur en mètres
+PINE_SCALE = (11.0, 14.0)        # hauteur des pins (m)
+PINE_TRUNK_RADIUS = 0.016        # rayon du fût vers 15 % de la hauteur (au-dessus de l'évasement)
+PINE_HEIGHT = 1.0
+PINE_FOLIAGE = [(0.22, 0.6, 0.115), (0.6, 1.0, 0.075)]  # (y min, y max, rayon) des cylindres de feuillage
 TREE_SPACING = 1.6               # demi-distance minimale entre deux troncs (m)
 
 
@@ -174,14 +174,14 @@ class ForestAssets:
         from PIL import Image
         data = np.load(os.path.join(PINE_DIR, "pine.npz"))
         out = []
-        for part, tex_name in (("trunk", "trunk.png"), ("foliage", "pine.png")):
+        for part, tex_name, alpha in (("trunk", "bark.jpg", False), ("foliage", "needles.png", True)):
             verts = data[part].astype("f4")
             img = Image.open(os.path.join(PINE_DIR, tex_name)).convert("RGBA")
             out.append({
                 "vbo": self.ctx.buffer(verts.tobytes()),
                 "ibo": self.ctx.buffer(np.arange(len(verts), dtype="i4").tobytes()),
                 "texture": self._texture(img),
-                "alpha_mask": True,
+                "alpha_mask": alpha,
                 "color": (1.0, 1.0, 1.0),
             })
         pts = np.vstack([data["trunk"][:, :3], data["foliage"][:, :3]])

@@ -1,77 +1,95 @@
-"""Prépare le pin de la forêt à partir du modèle du projet C++ de 2A (trunk.obj, foliage.obj).
+"""Prépare le pin de la forêt à partir du modèle téléchargé « fir_spruce.fbx »
+(zip tree-3d-model-fir-spruce-pine : source/fir_spruce.fbx + textures/).
 
-- Tronc : on retire les branches en ne gardant que les triangles proches de l'axe
-  (rayon inférieur à 1,35 x le rayon du fût mesuré à cette hauteur).
-- Feuillage : on ne garde que les triangles au-dessus de FOLIAGE_CUT (pas de feuillage bas).
-- Le modèle de branches (branches.obj) n'est pas utilisé.
+Le modèle est composé de trois sortes d'objets :
+- « Circle.002 » : le fût (cylindre, matériau Bark) -> gardé ;
+- « st.001 »     : toutes les branches (bâtons, matériau Bark) -> supprimé entièrement ;
+- « Plane.0xx »  : les cartes de feuillage (matériau Branches, découpe par transparence),
+  qui commencent vers le tiers de la hauteur -> gardées.
 
-Sortie : Assets/models/pine/pine.npz (sommets [pos, normale, uv] du tronc et du feuillage)
-et copie des textures trunk.png et pine.png.
+Étape 1 (Blender, sans interface) : import du FBX, suppression des branches, export GLB.
+Étape 2 (Python) : lecture du GLB, mise à l'échelle (hauteur 1), sauvegarde en .npz,
+textures réduites : écorce 8K -> 2048, feuillage (preview 360 px avec alpha) copié.
 
-Usage : python tools/prepare_pine.py <dossier contenant trunk.obj, foliage.obj, trunk.png, pine.png>
+Sortie : Assets/models/pine/pine.npz, bark.jpg, needles.png
+
+Usage : python tools/prepare_pine.py <dossier dézippé> [chemin de blender.exe]
 """
 
 import os
-import shutil
+import subprocess
 import sys
+import tempfile
 
 import numpy as np
 
-FOLIAGE_CUT = 1.3  # hauteur (unités du modèle, pin de 3,9) sous laquelle on retire le feuillage
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
-# rayon du fût en fonction de la hauteur, mesuré sur trunk.obj
-CORE_Y = np.array([0.0, 0.3, 0.6, 0.9, 1.2, 1.5, 1.8, 2.1, 2.4, 2.7, 3.0, 3.9])
-CORE_R = np.array([0.14, 0.13, 0.115, 0.105, 0.095, 0.085, 0.078, 0.06, 0.05, 0.042, 0.035, 0.01])
+from gltf_loader import load_glb  # noqa: E402
 
+DEFAULT_BLENDER = r"C:\Program Files\Blender Foundation\Blender 4.5\blender.exe"
+DROP_OBJECTS = ("st.001",)  # objets « branches » à supprimer
 
-def load_obj(path):
-    """Triangles non indexés : tableau (n, 8) = position, normale, uv (v retourné pour OpenGL)."""
-    V, T, N, out = [], [], [], []
-    with open(path) as f:
-        for line in f:
-            p = line.split()
-            if not p:
-                continue
-            if p[0] == "v":
-                V.append([float(x) for x in p[1:4]])
-            elif p[0] == "vt":
-                T.append([float(x) for x in p[1:3]])
-            elif p[0] == "vn":
-                N.append([float(x) for x in p[1:4]])
-            elif p[0] == "f":
-                corners = []
-                for w in p[1:]:
-                    a = w.split("/")
-                    corners.append((int(a[0]) - 1,
-                                    int(a[1]) - 1 if len(a) > 1 and a[1] else -1,
-                                    int(a[2]) - 1 if len(a) > 2 and a[2] else -1))
-                for k in range(1, len(corners) - 1):  # triangulation en éventail
-                    for vi, ti, ni in (corners[0], corners[k], corners[k + 1]):
-                        out.append(V[vi] + (N[ni] if ni >= 0 else [0.0, 1.0, 0.0]) + (T[ti] if ti >= 0 else [0.0, 0.0]))
-    a = np.array(out, dtype="f4")
-    a[:, 7] = 1.0 - a[:, 7]
-    return a
+BLENDER_SCRIPT = r'''
+import bpy, sys
+src, dst, drop = sys.argv[sys.argv.index("--") + 1:][:3]
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.import_scene.fbx(filepath=src)
+for name in drop.split(","):
+    obj = bpy.data.objects.get(name)
+    if obj is not None:
+        bpy.data.objects.remove(obj, do_unlink=True)
+        print("supprimé :", name)
+bpy.ops.export_scene.gltf(filepath=dst, export_format="GLB", export_image_format="NONE",
+                          export_yup=True, export_apply=True)
+'''
 
 
-def main(src):
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    dst = os.path.join(root, "Assets", "models", "pine")
+def main(src_dir, blender=DEFAULT_BLENDER):
+    from PIL import Image
+    Image.MAX_IMAGE_PIXELS = None
+    dst = os.path.join(ROOT, "Assets", "models", "pine")
     os.makedirs(dst, exist_ok=True)
 
-    trunk = load_obj(os.path.join(src, "trunk.obj")).reshape(-1, 3, 8)
-    r = np.hypot(trunk[:, :, 0], trunk[:, :, 2])
-    keep = (r < 1.35 * np.interp(trunk[:, :, 1], CORE_Y, CORE_R) + 0.015).all(axis=1)
-    trunk = trunk[keep].reshape(-1, 8)
+    with tempfile.TemporaryDirectory() as tmp:
+        script = os.path.join(tmp, "strip.py")
+        glb = os.path.join(tmp, "fir.glb")
+        with open(script, "w", encoding="utf-8") as f:
+            f.write(BLENDER_SCRIPT)
+        run = subprocess.run([blender, "-b", "--python", script, "--",
+                              os.path.join(src_dir, "source", "fir_spruce.fbx"), glb, ",".join(DROP_OBJECTS)],
+                             capture_output=True, text=True, errors="replace")
+        if not os.path.exists(glb):
+            raise RuntimeError("Blender n'a pas exporté le GLB :\n" + run.stdout[-3000:] + run.stderr[-3000:])
+        parts = load_glb(glb)
 
-    foliage = load_obj(os.path.join(src, "foliage.obj")).reshape(-1, 3, 8)
-    foliage = foliage[foliage[:, :, 1].min(axis=1) > FOLIAGE_CUT].reshape(-1, 8)
+    # Une primitive par objet : le fût est le seul objet vertical, haut et centré ;
+    # toutes les autres primitives sont des cartes de feuillage.
+    trunk, foliage = [], []
+    for verts, idx, color, img in parts:
+        tri = verts[idx]
+        r = np.hypot(tri[:, 0], tri[:, 2])
+        (trunk if r.max() < 1.5 and np.ptp(tri[:, 1]) > 10.0 else foliage).append(tri)
+    trunk, foliage = np.vstack(trunk), np.vstack(foliage)
 
-    np.savez_compressed(os.path.join(dst, "pine.npz"), trunk=trunk, foliage=foliage,
-                        core_y=CORE_Y, core_r=CORE_R, foliage_cut=FOLIAGE_CUT)
-    for name in ("trunk.png", "pine.png"):
-        shutil.copy(os.path.join(src, name), dst)
-    print(f"tronc : {len(trunk) // 3} triangles, feuillage : {len(foliage) // 3} triangles -> {dst}")
+    y0 = trunk[:, 1].min()
+    height = max(trunk[:, 1].max(), foliage[:, 1].max()) - y0
+    for a in (trunk, foliage):
+        a[:, 1] -= y0
+        a[:, :3] /= height  # pin de hauteur 1 : l'échelle est choisie dans forest_env.py
+
+    foliage_from = foliage[:, 1].min()
+    np.savez_compressed(os.path.join(dst, "pine.npz"), trunk=trunk.astype("f4"), foliage=foliage.astype("f4"),
+                        foliage_from=foliage_from, source_height=height)
+
+    bark = Image.open(os.path.join(src_dir, "textures", "wgvqdap_8K_Albedo.jpg")).convert("RGB")
+    bark.resize((2048, 2048), Image.LANCZOS).save(os.path.join(dst, "bark.jpg"), quality=90)
+    Image.open(os.path.join(src_dir, "textures", "qgpuG2_Preview.png")).convert("RGBA").save(
+        os.path.join(dst, "needles.png"))
+    print(f"fût : {len(trunk) // 3} triangles, feuillage : {len(foliage) // 3} triangles, "
+          f"feuillage à partir de {foliage_from:.2f} de la hauteur -> {dst}")
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    main(sys.argv[1], *(sys.argv[2:3]))
