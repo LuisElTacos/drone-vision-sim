@@ -1,11 +1,13 @@
-"""Environnement « forêt » : forêt dense générée à partir du pack Stylized Nature MegaKit
-(Quaternius, CC0), dessinée en instanciation (un seul appel de rendu par modèle).
+"""Environnement « forêt » : forêt dense de pins à tronc droit, dessinée en instanciation
+(un seul appel de rendu par modèle).
 
-- Arbres feuillus, pins, quelques arbres morts et tordus, répartis aléatoirement avec
-  une distance minimale entre troncs ; rochers, buissons, fougères, herbes,
-  champignons, cailloux, plantes et fleurs pour le décor.
-- Collisions : cylindre vertical par tronc, sphère pour le feuillage, sphère par
-  buisson, boîte par rocher. Herbes, fleurs, fougères, cailloux : pas de collision.
+- Arbres : pin du projet C++ de 2A, préparé par tools/prepare_pine.py (branches retirées,
+  pas de feuillage en bas : fût dégagé sur environ le tiers inférieur), répartis
+  aléatoirement avec une distance minimale entre troncs.
+- Décor du pack Stylized Nature MegaKit (Quaternius, CC0) : rochers, fougères, herbes,
+  champignons, cailloux, plantes et fleurs.
+- Collisions : cylindre vertical par tronc, deux cylindres pour le feuillage, boîte par
+  rocher. Herbes, fleurs, fougères, cailloux : pas de collision.
 - Départ en bordure sud, cible (coordonnée connue) en bordure nord.
 
 Tout est tiré à partir d'une graine. Les modèles et textures sont chargés une seule
@@ -24,6 +26,7 @@ from gltf_loader import load_gltf
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NATURE_DIR = os.path.join(HERE, "Assets", "models", "nature")
+PINE_DIR = os.path.join(HERE, "Assets", "models", "pine")
 
 FOREST_VERTEX_SHADER = """
 #version 330
@@ -100,16 +103,13 @@ void main() {
 }
 """
 
-TREES = {  # nom : (poids de tirage, échelle min, échelle max)
-    "CommonTree_1": (3, 0.9, 1.3), "CommonTree_2": (3, 0.9, 1.3), "CommonTree_3": (3, 0.9, 1.3),
-    "CommonTree_4": (3, 0.9, 1.3), "CommonTree_5": (3, 0.9, 1.3),
-    "Pine_1": (3, 0.9, 1.4), "Pine_2": (3, 0.9, 1.4), "Pine_3": (3, 0.9, 1.4),
-    "Pine_4": (3, 0.9, 1.4), "Pine_5": (3, 0.9, 1.4),
-    "DeadTree_1": (1, 0.8, 1.1), "DeadTree_2": (1, 0.8, 1.1), "DeadTree_3": (1, 0.8, 1.1),
-    "TwistedTree_1": (0.5, 0.45, 0.6), "TwistedTree_2": (0.5, 0.45, 0.6),
-}
+# Pin (unités du modèle : hauteur 3,9) : échelle tirée, rayon du fût et volumes du feuillage
+PINE_SCALE = (2.8, 3.6)          # soit 11 à 14 m de haut
+PINE_TRUNK_RADIUS = 0.13         # rayon du fût vers 0,5 (au-dessus de l'évasement des racines)
+PINE_HEIGHT = 3.9
+PINE_FOLIAGE = [(1.3, 2.3, 1.0), (2.3, 3.9, 0.6)]  # (y min, y max, rayon) des cylindres de feuillage
+TREE_SPACING = 1.6               # demi-distance minimale entre deux troncs (m)
 ROCKS = ["Rock_Medium_1", "Rock_Medium_2", "Rock_Medium_3"]
-BUSHES = ["Bush_Common", "Bush_Common_Flowers"]
 DECOR = {  # nom : (nombre, échelle min, échelle max) ; sans collision (les modèles du pack sont ~2x trop grands)
     "Fern_1": (60, 0.6, 1.0),
     "Grass_Common_Short": (260, 0.35, 0.55), "Grass_Common_Tall": (140, 0.3, 0.45),
@@ -120,8 +120,6 @@ DECOR = {  # nom : (nombre, échelle min, échelle max) ; sans collision (les mo
     "Pebble_Round_1": (25, 1.0, 2.0), "Pebble_Round_2": (25, 1.0, 2.0), "Pebble_Round_3": (25, 1.0, 2.0),
 }
 MUSHROOMS = ["Mushroom_Common", "Mushroom_Laetiporus"]
-# Les buissons du pack utilisent des feuilles rouges : on leur met les feuilles vertes des feuillus
-LEAF_OVERRIDE = {"Bush_Common": "Leaves_NormalTree_C.png", "Bush_Common_Flowers": "Leaves_NormalTree_C.png"}
 
 
 def _instance_matrix(x, z, yaw, scale, y=0.0):
@@ -141,9 +139,10 @@ class ForestAssets:
         self.prog = ctx.program(vertex_shader=FOREST_VERTEX_SHADER, fragment_shader=FOREST_FRAGMENT_SHADER)
         self.textures = {}
         self.models = {}  # nom -> {"prims": [...], "bbox": (lo, hi), "trunk": ..., "leaves": ...}
-        names = set(TREES) | set(ROCKS) | set(BUSHES) | set(DECOR) | set(MUSHROOMS)
+        names = set(ROCKS) | set(DECOR) | set(MUSHROOMS)
         for name in sorted(names):
             self.models[name] = self._load(name)
+        self.models["Pine"] = self._load_pine()
         # sol forestier : un grand quad
         quad = np.array([[-1, 0, -1, 0, 1, 0, 0, 0], [1, 0, -1, 0, 1, 0, 1, 0],
                          [1, 0, 1, 0, 1, 0, 1, 1], [-1, 0, 1, 0, 1, 0, 0, 1]], dtype="f4")
@@ -155,19 +154,41 @@ class ForestAssets:
         if key not in self.textures:
             tex = self.ctx.texture(img.size, 4, img.tobytes())
             tex.build_mipmaps()
+            self._preserve_alpha_coverage(tex, img)
             tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
             tex.anisotropy = 4.0
             self.textures[key] = tex
         return self.textures[key]
 
+    @staticmethod
+    def _preserve_alpha_coverage(tex, img, threshold=0.5):
+        """Les mipmaps moyennent l'alpha : au loin, le feuillage passerait sous le seuil de
+        découpe et disparaîtrait. On réécrit chaque niveau en amplifiant l'alpha pour garder
+        la même proportion de pixels opaques qu'au niveau 0."""
+        from PIL import Image
+        alpha0 = np.asarray(img, dtype="f4")[:, :, 3] / 255.0
+        coverage = (alpha0 >= threshold).mean()
+        if coverage in (0.0, 1.0):
+            return
+        w, h = img.size
+        level = 1
+        while w > 1 or h > 1:
+            w, h = max(1, w // 2), max(1, h // 2)
+            small = np.asarray(img.resize((w, h), Image.BOX), dtype="f4")
+            a = small[:, :, 3] / 255.0
+            lo, hi = 1.0, 16.0
+            for _ in range(12):  # recherche du facteur qui redonne la couverture d'origine
+                k = (lo + hi) / 2.0
+                if (np.clip(a * k, 0, 1) >= threshold).mean() < coverage:
+                    lo = k
+                else:
+                    hi = k
+            small[:, :, 3] = np.clip(a * hi, 0, 1) * 255.0
+            tex.write(small.astype("u1").tobytes(), level=level)
+            level += 1
+
     def _load(self, name):
         prims = load_gltf(os.path.join(NATURE_DIR, name + ".gltf"))
-        if name in LEAF_OVERRIDE:
-            from PIL import Image
-            leaf = Image.open(os.path.join(NATURE_DIR, LEAF_OVERRIDE[name])).convert("RGBA")
-            for p in prims:
-                if p["material"].startswith("Lea"):
-                    p["image"] = leaf
         out = []
         for p in prims:
             out.append({
@@ -178,34 +199,24 @@ class ForestAssets:
                 "color": p["color"],
             })
         pts = np.vstack([p["verts"][:, :3] for p in prims])
-        model = {"prims": out, "bbox": (pts.min(axis=0), pts.max(axis=0))}
+        return {"prims": out, "bbox": (pts.min(axis=0), pts.max(axis=0))}
 
-        bark = [p["verts"][:, :3] for p in prims if p["material"].startswith("Bark")]
-        leaves = [p["verts"][:, :3] for p in prims if p["material"].startswith("Lea")]
-        if bark:
-            b = np.vstack(bark)
-            # tronc mesuré au-dessus des racines (0,5 à 1,5 m) ; médiane pour ignorer les branches basses
-            for y0, y1 in ((0.5, 1.5), (0.0, 2.5)):
-                low = b[(b[:, 1] > y0) & (b[:, 1] < y1)]
-                if len(low) >= 20:
-                    break
-            else:
-                low = b
-            # le tronc part de l'origine du modèle ; on écarte les sommets des branches basses
-            # (pins) en ne gardant que ceux proches de l'axe
-            r0 = np.hypot(low[:, 0], low[:, 2])
-            ring = low[r0 < max(1.6 * np.percentile(r0, 10), 0.25)]
-            if len(ring) < 8:
-                ring = low
-            cx, cz = ring[:, 0].mean(), ring[:, 2].mean()
-            r = np.percentile(np.hypot(ring[:, 0] - cx, ring[:, 2] - cz), 90)
-            top = np.vstack(leaves)[:, 1].min() if leaves else 0.6 * b[:, 1].max()
-            model["trunk"] = (cx, cz, max(r, 0.12), top)
-        if leaves:
-            lv = np.vstack(leaves)
-            lo, hi = lv.min(axis=0), lv.max(axis=0)
-            model["leaves"] = ((lo + hi) / 2.0, 0.4 * ((hi[0] - lo[0]) + (hi[2] - lo[2])) / 2.0)
-        return model
+    def _load_pine(self):
+        from PIL import Image
+        data = np.load(os.path.join(PINE_DIR, "pine.npz"))
+        out = []
+        for part, tex_name in (("trunk", "trunk.png"), ("foliage", "pine.png")):
+            verts = data[part].astype("f4")
+            img = Image.open(os.path.join(PINE_DIR, tex_name)).convert("RGBA")
+            out.append({
+                "vbo": self.ctx.buffer(verts.tobytes()),
+                "ibo": self.ctx.buffer(np.arange(len(verts), dtype="i4").tobytes()),
+                "texture": self._texture(img),
+                "alpha_mask": True,
+                "color": (1.0, 1.0, 1.0),
+            })
+        pts = np.vstack([data["trunk"][:, :3], data["foliage"][:, :3]])
+        return {"prims": out, "bbox": (pts.min(axis=0), pts.max(axis=0))}
 
 
 class ForestEnv:
@@ -217,7 +228,7 @@ class ForestEnv:
         self.size = size
         self.tree_density = tree_density
         self.colliders = []
-        self.obstacles = []  # vérité terrain : arbres, rochers, buissons
+        self.obstacles = []  # vérité terrain : arbres et rochers
         self.instances = {}  # nom -> liste de matrices 4x4
         self._generate()
         self._build_vaos()
@@ -235,7 +246,7 @@ class ForestEnv:
 
     def summary(self):
         kinds = [o["kind"] for o in self.obstacles]
-        return {k: kinds.count(k) for k in ("arbre", "rocher", "buisson")}
+        return {k: kinds.count(k) for k in ("arbre", "rocher")}
 
     # --- génération -------------------------------------------------------------
 
@@ -260,34 +271,26 @@ class ForestEnv:
             c, s = math.cos(yaw), math.sin(yaw)
             return c * lx + s * lz, -s * lx + c * lz
 
-        # Arbres
-        names = list(TREES)
-        weights = [TREES[n][0] for n in names]
+        # Pins
         n_trees = int(self.tree_density * self.size * self.size)
         trunks = []
-        for _ in range(n_trees * 30):
+        for _ in range(n_trees * 40):
             if len(trunks) >= n_trees:
                 break
             p = np.array([rng.uniform(-h, h), rng.uniform(-h, h)])
-            if not is_free(p, 1.3):
+            if not is_free(p, TREE_SPACING):
                 continue
-            name = rng.choices(names, weights)[0]
-            _, s0, s1 = TREES[name]
-            scale, yaw = rng.uniform(s0, s1), rng.uniform(0, 2 * math.pi)
-            add(name, p[0], p[1], yaw, scale)
-            occupied.append((p[0], p[1], 1.3))
-            model = self.assets.models[name]
-            cx, cz, r, top = model["trunk"]
-            dx, dz = rotate(cx * scale, cz * scale, yaw)
-            wx, wz = ox + p[0] + dx, oz + p[1] + dz
-            self.colliders.append(VerticalCylinder((wx, wz), r * scale, -0.5, top * scale))
+            scale, yaw = rng.uniform(*PINE_SCALE), rng.uniform(0, 2 * math.pi)
+            add("Pine", p[0], p[1], yaw, scale)
+            occupied.append((p[0], p[1], TREE_SPACING))
             trunks.append((p[0], p[1]))
-            if "leaves" in model:
-                lc, lr = model["leaves"]
-                lx, lz = rotate(lc[0] * scale, lc[2] * scale, yaw)
-                self.colliders.append(Sphere((ox + p[0] + lx, lc[1] * scale, oz + p[1] + lz), lr * scale))
-            self.obstacles.append({"kind": "arbre", "model": name, "center": (wx, 0.0, wz),
-                                   "radius": r * scale, "height": model["bbox"][1][1] * scale})
+            wx, wz = ox + p[0], oz + p[1]
+            self.colliders.append(VerticalCylinder((wx, wz), PINE_TRUNK_RADIUS * scale, -0.5, PINE_HEIGHT * scale))
+            for y0, y1, r in PINE_FOLIAGE:
+                self.colliders.append(VerticalCylinder((wx, wz), r * scale, y0 * scale, y1 * scale))
+            self.obstacles.append({"kind": "arbre", "model": "Pine", "center": (wx, 0.0, wz),
+                                   "radius": PINE_TRUNK_RADIUS * scale, "height": PINE_HEIGHT * scale,
+                                   "foliage_from": PINE_FOLIAGE[0][0] * scale})
 
         # Rochers (boîte englobante de la roche tournée)
         for _ in range(400):
@@ -310,23 +313,6 @@ class ForestEnv:
             self.colliders.append(Box(center, half))
             self.obstacles.append({"kind": "rocher", "model": name, "center": center, "half": half})
 
-        # Buissons (sphère)
-        for _ in range(600):
-            if sum(1 for o in self.obstacles if o["kind"] == "buisson") >= 45:
-                break
-            name = rng.choice(BUSHES)
-            scale, yaw = rng.uniform(0.6, 1.0), rng.uniform(0, 2 * math.pi)
-            lo, hi = self.assets.models[name]["bbox"]
-            r = scale * 0.45 * ((hi[0] - lo[0]) + (hi[2] - lo[2])) / 2.0
-            p = np.array([rng.uniform(-h, h), rng.uniform(-h, h)])
-            if not is_free(p, r):
-                continue
-            add(name, p[0], p[1], yaw, scale)
-            occupied.append((p[0], p[1], r))
-            center = (ox + p[0], scale * hi[1] * 0.4, oz + p[1])
-            self.colliders.append(Sphere(center, r))
-            self.obstacles.append({"kind": "buisson", "model": name, "center": center, "radius": r})
-
         # Décor sans collision
         for name, (count, s0, s1) in DECOR.items():
             for _ in range(count):
@@ -336,7 +322,7 @@ class ForestEnv:
             if not trunks:
                 break
             tx, tz = rng.choice(trunks)
-            a, d = rng.uniform(0, 2 * math.pi), rng.uniform(0.6, 1.6)
+            a, d = rng.uniform(0, 2 * math.pi), rng.uniform(0.8, 1.8)
             add(rng.choice(MUSHROOMS), tx + d * math.cos(a), tz + d * math.sin(a),
                 rng.uniform(0, 2 * math.pi), rng.uniform(0.35, 0.7))
 
