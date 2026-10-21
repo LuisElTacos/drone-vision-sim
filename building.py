@@ -29,6 +29,7 @@ MAT_STEEL_YELLOW = 2.0   # Zébrures de sécurité jaunes et noires (portail pri
 MAT_FLOOR = 3.0          # Dalle béton lissée avec joints de dilatation
 MAT_ROOF = 4.0           # Toiture industrielle étanche / bac acier
 MAT_INTERIOR_WALL = 5.0  # Parpaings peints clairs pour murs intérieurs
+MAT_BRICK = 6.0          # Briques rouges (environnement « murs troués »)
 
 # ---------------------------------------------------------------------------
 # Shaders GLSL 330
@@ -156,7 +157,7 @@ void main() {
         float rib = abs(fract(v_world.x * 2.0) - 0.5);
         base = mix(vec3(0.24, 0.25, 0.27), vec3(0.16, 0.17, 0.19), step(0.4, rib));
         spec = pow(max(dot(n, h), 0.0), 24.0) * 0.20;
-    } else {
+    } else if (v_mat < 5.5) {
         // MAT 5: Murs intérieurs (parpaings peints clairs pour visibilité intérieure)
         float bw = 0.50;
         float bh = 0.25;
@@ -173,6 +174,26 @@ void main() {
         vec3 wall_col = vec3(0.72 + rnd, 0.73 + rnd, 0.70 + rnd);
         base = mix(wall_col, vec3(0.48, 0.48, 0.46), is_mortar);
         spec = pow(max(dot(n, h), 0.0), 16.0) * 0.10;
+    } else {
+        // MAT 6: Briques rouges en appareil courant (22 x 6,5 cm + joints de 1 cm)
+        float bw = 0.23;
+        float bh = 0.075;
+        float row = floor(coord.y / bh);
+        float x_off = mod(row, 2.0) * (bw * 0.5);
+        vec2 bcoord = vec2(coord.x + x_off, coord.y);
+        vec2 bid = floor(bcoord / vec2(bw, bh));
+        vec2 f = fract(bcoord / vec2(bw, bh));
+        float is_mortar = step(f.x, 0.045) + step(f.y, 0.14);
+        is_mortar = clamp(is_mortar, 0.0, 1.0);
+        // teinte propre à chaque brique (évite un motif parfaitement répétitif)
+        float r1 = hash(bid);
+        float r2 = hash(bid + vec2(17.0, 3.0));
+        float grain = (noise(coord * 60.0) - 0.5) * 0.10;
+        vec3 brick_col = vec3(0.55 + 0.20 * r1, 0.22 + 0.10 * r2, 0.15 + 0.06 * r1) + vec3(grain);
+        if (r2 > 0.92) brick_col *= 0.6;   // quelques briques sombres
+        vec3 mortar_col = vec3(0.70, 0.68, 0.63);
+        base = mix(brick_col, mortar_col, is_mortar);
+        spec = pow(max(dot(n, h), 0.0), 12.0) * 0.06;
     }
 
     // Éclairage hémisphérique ciel/sol + illumination intérieure de rebond

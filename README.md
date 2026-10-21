@@ -18,6 +18,14 @@ Le modèle du drone (`Assets/models/DJI_Avata2_Sketchfab.glb`, DJI Avata 2 issu 
 python scene.py
 ```
 
+Options : `--env murs|batiment|vide` choisit l'environnement de départ (par défaut `murs`), `--seed N` fixe la graine des murs troués.
+
+## Environnements
+
+- **Murs troués** (`walls_env.py`) : murs en briques successifs percés de passages, de culs-de-sac (poches fermées) et d'ouvertures trop étroites. Un chemin vers la cible (sphère verte) est garanti, un plafond invisible empêche de passer par-dessus. Généré à partir d'une graine ; vérité terrain des ouvertures via `get_openings()`. Bouton « Nouveaux murs » dans le panneau.
+- **Bâtiment** (`building.py`) : bâtiment industriel procédural pour le vol intérieur.
+- **Vide** : sol seul.
+
 ## Commandes
 
 | Touche | Action |
@@ -37,6 +45,7 @@ Le panneau de gauche permet de choisir les vues (caméra gauche, caméra droite,
 |---|---|
 | `scene.py` | point d'entrée : scène, drone, caméras, boucle principale |
 | `building.py` | bâtiment procédural et ses collisions |
+| `walls_env.py` | environnement « murs troués » |
 | `collision.py` | collisions du drone (sol, sphères, boîtes) |
 | `gltf_loader.py` | chargeur GLB |
 | `ui_panel.py` | panneau latéral ImGui |

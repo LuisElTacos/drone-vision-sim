@@ -20,8 +20,10 @@ Contrôles :
   Échap (non capturé): quitter
 """
 
+import argparse
 import math
 import os
+import random
 import sys
 
 import glfw
@@ -32,6 +34,7 @@ from building import ProceduralBuilding
 from collision import Box, DroneBox, Ground, Sphere, move_with_collisions
 from gltf_loader import bounds, load_glb
 from ui_panel import PANEL_WIDTH, SidePanel
+from walls_env import WallMaze
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DRONE_MODEL = os.path.join(HERE, "Assets", "models", "DJI_Avata2_Sketchfab.glb")
@@ -53,6 +56,11 @@ SPLIT = "grid"             # vues en grille ("grid"), en colonnes ("side_by_side
 WINDOW_SIZE = (1860, 800)  # panneau de 270 px + vues
 WORLD_CAMERA_POSITION = (12.0, 9.0, 6.0)   # caméra fixe du monde
 WORLD_CAMERA_TARGET = (0.0, 3.0, -10.0)
+
+# Environnements : valeur de settings["building_mode"]
+ENV_BUILDING, ENV_WALLS, ENV_EMPTY = 0, 1, 2
+ENV_NAMES = {"batiment": ENV_BUILDING, "murs": ENV_WALLS, "vide": ENV_EMPTY}
+BUILDING_SPAWN = ((-2.7, 1.4, 2.0), -90.0)
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +284,7 @@ void main() {
 class Scene:
     """Contient les objets (et leurs collisionneurs) et sait se dessiner depuis une caméra."""
 
-    def __init__(self, ctx):
+    def __init__(self, ctx, maze_seed=0):
         self.ctx = ctx
         self.prog = ctx.program(vertex_shader=VERTEX_SHADER, fragment_shader=FRAGMENT_SHADER)
         self.objects = []  # objets de base (sol, sphère, etc.)
@@ -290,21 +298,45 @@ class Scene:
         # Bâtiment industriel procédural (vol intérieur + shader architectural)
         self.procedural_building = ProceduralBuilding(self.ctx, origin=(0.0, 0.0, -12.0))
 
+        # Environnement « murs troués » (placé à l'écart, en x = 60)
+        self.wall_maze = WallMaze(self.ctx, seed=maze_seed)
+        v, i = make_sphere(0.25)
+        self.target_vao = self.make_vao(v, i)
+
         # Sphère et mur de test conservés dans la scène
         v, i = make_sphere(1.0)
         self.add(v, i, translation(14.0, 1.0, -5.0), (0.85, 0.25, 0.2), collider=Sphere((14.0, 1.0, -5.0), 1.0))
         self.add_wall_with_hole(z=-28.0)
 
-        # Mode actif : 0 = procédural, 2 = aucun
-        self.building_mode = 0
+        # Environnement actif : ENV_BUILDING, ENV_WALLS ou ENV_EMPTY
+        self.building_mode = ENV_BUILDING
 
     @property
     def colliders(self):
         """Collisionneurs dynamiques selon le modèle de bâtiment actif."""
-        if self.building_mode == 0 and self.procedural_building is not None:
+        if self.building_mode == ENV_BUILDING and self.procedural_building is not None:
             return [*self.base_colliders, *self.procedural_building.colliders]
-        else:
-            return self.base_colliders
+        if self.building_mode == ENV_WALLS:
+            return [*self.base_colliders, *self.wall_maze.colliders]
+        return self.base_colliders
+
+    def regenerate_maze(self, seed):
+        self.wall_maze.release()
+        self.wall_maze = WallMaze(self.ctx, seed=seed)
+
+    def spawn(self, mode):
+        return self.wall_maze.spawn if mode == ENV_WALLS else BUILDING_SPAWN
+
+    def overview_camera(self, mode):
+        if mode == ENV_WALLS:
+            return self.wall_maze.overview_camera
+        return WORLD_CAMERA_POSITION, WORLD_CAMERA_TARGET
+
+    def target_items(self):
+        """Repère vert de la cible (environnement murs), pour les vues extérieures."""
+        if self.building_mode != ENV_WALLS:
+            return []
+        return [(self.target_vao, translation(*self.wall_maze.target), (0.1, 0.9, 0.2), False)]
 
     def make_texture(self, img):
         """Convertit une image PIL en texture ModernGL avec mipmapping."""
@@ -351,8 +383,10 @@ class Scene:
         self.building_mode = building_mode
 
         # 1. Rendu du bâtiment procédural avec son shader architectural dédié
-        if self.building_mode == 0 and self.procedural_building is not None:
+        if self.building_mode == ENV_BUILDING and self.procedural_building is not None:
             self.procedural_building.render(camera, aspect, light_dir=(-0.4, -1.0, -0.3))
+        elif self.building_mode == ENV_WALLS:
+            self.wall_maze.render(camera, aspect, light_dir=(-0.4, -1.0, -0.3))
 
         # 2. Rendu des objets standard (sol, sphère, drone)
         self.prog["u_proj"].write(camera.projection(aspect).T.copy().tobytes())
@@ -655,6 +689,12 @@ def tile_viewports(x0, w, h, n):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Simulation de drone stéréo")
+    parser.add_argument("--env", choices=sorted(ENV_NAMES), default="murs", help="environnement de départ")
+    parser.add_argument("--seed", type=int, default=0, help="graine de l'environnement « murs »")
+    args = parser.parse_args()
+    start_mode = ENV_NAMES[args.env]
+
     if not glfw.init():
         sys.exit("Impossible d'initialiser GLFW")
     glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
@@ -669,8 +709,10 @@ def main():
     glfw.swap_interval(1)
 
     ctx = moderngl.create_context()
-    scene = Scene(ctx)
-    drone = Drone(scene, position=(-2.7, 1.4, 2.0), yaw=-90.0)
+    scene = Scene(ctx, maze_seed=args.seed)
+    scene.building_mode = start_mode
+    spawn_pos, spawn_yaw = scene.spawn(start_mode)
+    drone = Drone(scene, position=spawn_pos, yaw=spawn_yaw)
     panel = SidePanel()
 
     # Paramètres de l'interface et du contrôle
@@ -682,9 +724,14 @@ def main():
         "gamepad_connected": False,
         "gamepad_name": "",
         "show_grid": True,         # sol requadrillé par défaut
-        "building_mode": 0,        # 0: Procédural (vol intérieur), 2: Aucun
+        "building_mode": start_mode,  # ENV_BUILDING, ENV_WALLS ou ENV_EMPTY
         "teleport": None,          # tuple (pos, yaw) si téléportation demandée
+        "maze_seed": args.seed,
+        "regen_maze": False,       # bouton « Nouveaux murs »
+        "maze_spawn": scene.wall_maze.spawn,
+        "maze_info": [],
     }
+    last_mode = start_mode
 
     # [libellé, actif, caméra] : l'ordre est celui d'affichage, de gauche à droite.
     views = []
@@ -692,7 +739,21 @@ def main():
         views.append([f"{name} G", True, drone.cameras[2 * k]])
         views.append([f"{name} D", True, drone.cameras[2 * k + 1]])
     chase_view = ["Caméra de suivi", False, ChaseCamera(drone)]
-    views += [["Caméra fixe (monde)", True, LookAtCamera(WORLD_CAMERA_POSITION, WORLD_CAMERA_TARGET)], chase_view]
+    world_cam = LookAtCamera(*scene.overview_camera(start_mode))
+    views += [["Caméra fixe (monde)", True, world_cam], chase_view]
+
+    def update_env_info():
+        maze = scene.wall_maze
+        counts = maze.summary()
+        settings["maze_spawn"] = maze.spawn
+        settings["maze_info"] = [
+            f"Graine : {maze.seed}",
+            f"{maze.n_walls} murs, {len(maze.openings)} ouvertures",
+            f"{counts['passage']} passages, {counts['cul_de_sac']} culs-de-sac",
+            f"{counts['trop_petit']} trop petites",
+        ]
+
+    update_env_info()
     onboard = set(id(c) for c in drone.cameras)
 
     state = {"captured": False, "last": None, "mouse_yaw_delta": 0.0}
@@ -829,9 +890,23 @@ def main():
             drone.update_cameras()
             settings["teleport"] = None
 
-        # Synchronisation du mode de bâtiment sélectionné
+        # Synchronisation de l'environnement sélectionné
         b_mode = int(settings.get("building_mode", 0))
         scene.building_mode = b_mode
+        if settings.get("regen_maze"):
+            settings["regen_maze"] = False
+            settings["maze_seed"] = random.randrange(100000)
+            scene.regenerate_maze(settings["maze_seed"])
+            update_env_info()
+            last_mode = None  # force le retour au départ ci-dessous
+        if b_mode != last_mode:
+            last_mode = b_mode
+            world_cam.position, world_cam.target = (np.array(p, dtype="f4") for p in scene.overview_camera(b_mode))
+            t_pos, t_yaw = scene.spawn(b_mode)
+            drone.position = np.array(t_pos, dtype="f8")
+            drone.velocity = np.zeros(3, dtype="f8")
+            drone.yaw, drone.pitch, drone.roll = float(t_yaw), 0.0, 0.0
+            drone.update_cameras()
 
         # Vecteur de consigne de vitesse [m/s]
         v_cmd = np.array([cmd_fwd * max_h, cmd_right * max_h, cmd_up * max_v])
@@ -852,7 +927,7 @@ def main():
             ctx.clear(0.12, 0.12, 0.12)
             panel_px = round(PANEL_WIDTH * w / max(ww, 1))
             active = [v for v in views if v[1]]
-            drone_items = drone.render_items()
+            drone_items = drone.render_items() + scene.target_items()
             tiles = tile_viewports(panel_px, w - panel_px, h, len(active))
             for (_, _, cam), vp in zip(active, tiles):
                 ctx.viewport = vp
@@ -880,6 +955,11 @@ def main():
                 f"Base st. : {STEREO_BASELINE * 100:.0f} cm",
                 f"Caméras  : {len(drone.cameras)} ({len(STEREO_PAIRS)} paires)",
                 "Contact  : OUI" if drone.contact else "Contact  : non",
+            ]
+            if b_mode == ENV_WALLS:
+                d_target = float(np.linalg.norm(scene.wall_maze.target - drone.position))
+                info.append(f"Cible    : {d_target:5.1f} m")
+            info += [
                 "",
                 "Clic vue : capturer souris",
                 "Échap    : libérer souris",

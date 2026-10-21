@@ -107,12 +107,28 @@ class SidePanel:
             _, settings["show_grid"] = imgui.checkbox("Quadriller le sol", settings.get("show_grid", True))
 
             imgui.spacing()
-            imgui.text("Modèle de bâtiment :")
+            imgui.text("Environnement :")
             mode = settings.get("building_mode", 0)
-            if imgui.radio_button("Procédural (vol intérieur)", mode == 0):
+            if imgui.radio_button("Murs troués", mode == 1):
+                settings["building_mode"] = 1
+            if imgui.radio_button("Bâtiment (vol intérieur)", mode == 0):
                 settings["building_mode"] = 0
-            if imgui.radio_button("Sans bâtiment", mode == 2):
+            if imgui.radio_button("Vide", mode == 2):
                 settings["building_mode"] = 2
+
+            if mode == 1:
+                imgui.spacing()
+                imgui.separator()
+                imgui.text("Murs troués")
+                btn_w = PANEL_WIDTH - 25
+                if imgui.button("Nouveaux murs (graine aléatoire)", imgui.ImVec2(btn_w, 24)):
+                    settings["regen_maze"] = True
+                if imgui.button("Retour au départ", imgui.ImVec2(btn_w, 24)):
+                    settings["teleport"] = settings.get("maze_spawn")
+                imgui.spacing()
+                for line in settings.get("maze_info", []):
+                    imgui.text_colored(imgui.ImVec4(0.7, 0.7, 0.7, 1.0), line)
+                imgui.text_colored(imgui.ImVec4(0.3, 0.9, 0.4, 1.0), "Cible : sphère verte")
 
             if mode == 0:
                 imgui.spacing()

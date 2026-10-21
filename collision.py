@@ -90,6 +90,7 @@ def move_with_collisions(pos, displacement, forward, drone_box, colliders, max_s
     steps = max(1, int(np.ceil(np.linalg.norm(displacement) / max_step)))
     hit = False
     for _ in range(steps):
+        before = pos.copy()
         pos += displacement / steps
         for _ in range(iterations):
             moved = False
@@ -100,4 +101,9 @@ def move_with_collisions(pos, displacement, forward, drone_box, colliders, max_s
                     moved = hit = True
             if not moved:
                 break
+        else:
+            # Pas de position libre trouvée (ex. coincé entre les deux bords d'une
+            # ouverture trop étroite : les poussées se compensent) : on annule le pas.
+            if any(c.push_out(pos, axes, drone_box.half) is not None for c in colliders):
+                pos = before
     return pos, hit
