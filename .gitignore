@@ -10,8 +10,9 @@ imgui.ini
 # PDF du cours (ne pas republier)
 Docs/Slides/
 
-# Assets 3D : volumineux, on ne versionne que le modèle du drone
+# Assets 3D : volumineux, on ne versionne que le drone et le pack nature (CC0) de la forêt
 Assets/*
 !Assets/models/
 Assets/models/*
 !Assets/models/DJI_Avata2_Sketchfab.glb
+!Assets/models/nature/

@@ -10,7 +10,7 @@ Détails des choix, de l'avancement et des prochaines étapes : [PROJET.md](PROJ
 pip install -r requirements.txt
 ```
 
-Le modèle du drone (`Assets/models/DJI_Avata2_Sketchfab.glb`, DJI Avata 2 issu de Sketchfab) est inclus dans le dépôt.
+Le modèle du drone (`Assets/models/DJI_Avata2_Sketchfab.glb`, DJI Avata 2 issu de Sketchfab) et les modèles de la forêt (`Assets/models/nature/`) sont inclus dans le dépôt.
 
 ## Lancer
 
@@ -18,11 +18,12 @@ Le modèle du drone (`Assets/models/DJI_Avata2_Sketchfab.glb`, DJI Avata 2 issu 
 python scene.py
 ```
 
-Options : `--env murs|batiment|vide` choisit l'environnement de départ (par défaut `murs`), `--seed N` fixe la graine des murs troués.
+Options : `--env murs|foret|batiment|vide` choisit l'environnement de départ (par défaut `murs`), `--seed N` fixe la graine des murs troués et de la forêt.
 
 ## Environnements
 
 - **Murs troués** (`walls_env.py`) : murs successifs (une texture différente par mur : enduit, bois, tôle, pierre, parpaings) percés de passages, de culs-de-sac (poches fermées) et d'ouvertures trop étroites. Un chemin vers la cible (sphère verte) est garanti, un plafond invisible empêche de passer par-dessus. Généré à partir d'une graine ; vérité terrain des ouvertures via `get_openings()`. Bouton « Nouveaux murs » dans le panneau.
+- **Forêt** (`forest_env.py`) : forêt dense (175 arbres sur 50 × 50 m) avec rochers, buissons, fougères, herbes, champignons et fleurs, dessinée en instanciation. Modèles du pack [Stylized Nature MegaKit](https://quaternius.itch.io/stylized-nature-megakit) de Quaternius (CC0), dans `Assets/models/nature/`. Collisions : cylindre par tronc, sphère pour le feuillage et les buissons, boîte par rocher. Bouton « Nouvelle forêt » dans le panneau.
 - **Bâtiment** (`building.py`) : bâtiment industriel procédural pour le vol intérieur.
 - **Vide** : sol seul.
 
@@ -46,6 +47,7 @@ Le panneau de gauche permet de choisir les vues (caméra gauche, caméra droite,
 | `scene.py` | point d'entrée : scène, drone, caméras, boucle principale |
 | `building.py` | bâtiment procédural et ses collisions |
 | `walls_env.py` | environnement « murs troués » |
+| `forest_env.py` | environnement « forêt » (rendu instancié) |
 | `collision.py` | collisions du drone (sol, sphères, boîtes) |
 | `gltf_loader.py` | chargeur GLB |
 | `ui_panel.py` | panneau latéral ImGui |

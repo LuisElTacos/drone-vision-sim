@@ -70,6 +70,35 @@ class Sphere:
         return delta / dist * (self.radius - dist)
 
 
+class VerticalCylinder:
+    """Cylindre vertical (tronc d'arbre) : centre (x, z), rayon, hauteurs min et max."""
+
+    def __init__(self, center_xz, radius, y_min, y_max):
+        self.center_xz = np.asarray(center_xz, dtype="f8")
+        self.radius = float(radius)
+        self.y_min, self.y_max = float(y_min), float(y_max)
+
+    def push_out(self, pos, axes, half):
+        if pos[1] - half[1] >= self.y_max or pos[1] + half[1] <= self.y_min:
+            return None
+        rot = np.column_stack(axes)
+        center = np.array([self.center_xz[0], pos[1], self.center_xz[1]])
+        local = rot.T @ (center - pos)
+        closest = rot @ np.clip(local, -half, half) + pos
+        delta = closest - center
+        delta[1] = 0.0
+        dist = np.linalg.norm(delta)
+        if dist >= self.radius:
+            return None
+        if dist < 1e-9:  # axe du tronc dans la boîte : on sort par le côté le plus proche
+            away = pos - center
+            away[1] = 0.0
+            n = np.linalg.norm(away)
+            away = away / n if n > 1e-9 else axes[0]
+            return away * (self.radius + np.max(half[[0, 2]]))
+        return delta / dist * (self.radius - dist)
+
+
 class Ground:
     def __init__(self, height=0.0):
         self.height = height

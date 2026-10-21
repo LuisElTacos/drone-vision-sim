@@ -33,6 +33,7 @@ import numpy as np
 from building import ProceduralBuilding
 from collision import Box, DroneBox, Ground, Sphere, move_with_collisions
 from gltf_loader import bounds, load_glb
+from forest_env import ForestAssets, ForestEnv
 from ui_panel import PANEL_WIDTH, SidePanel
 from walls_env import WallMaze
 
@@ -58,8 +59,8 @@ WORLD_CAMERA_POSITION = (12.0, 9.0, 6.0)   # caméra fixe du monde
 WORLD_CAMERA_TARGET = (0.0, 3.0, -10.0)
 
 # Environnements : valeur de settings["building_mode"]
-ENV_BUILDING, ENV_WALLS, ENV_EMPTY = 0, 1, 2
-ENV_NAMES = {"batiment": ENV_BUILDING, "murs": ENV_WALLS, "vide": ENV_EMPTY}
+ENV_BUILDING, ENV_WALLS, ENV_EMPTY, ENV_FOREST = 0, 1, 2, 3
+ENV_NAMES = {"batiment": ENV_BUILDING, "murs": ENV_WALLS, "vide": ENV_EMPTY, "foret": ENV_FOREST}
 BUILDING_SPAWN = ((-2.7, 1.4, 2.0), -90.0)
 
 
@@ -300,6 +301,10 @@ class Scene:
 
         # Environnement « murs troués » (placé à l'écart, en x = 60)
         self.wall_maze = WallMaze(self.ctx, seed=maze_seed)
+        # Forêt (placée en x = -80) : chargée à la première sélection (modèles et textures)
+        self.forest_assets = None
+        self.forest = None
+        self.forest_seed = maze_seed
         v, i = make_sphere(0.25)
         self.target_vao = self.make_vao(v, i)
 
@@ -318,25 +323,53 @@ class Scene:
             return [*self.base_colliders, *self.procedural_building.colliders]
         if self.building_mode == ENV_WALLS:
             return [*self.base_colliders, *self.wall_maze.colliders]
+        if self.building_mode == ENV_FOREST and self.forest is not None:
+            return [*self.base_colliders, *self.forest.colliders]
         return self.base_colliders
+
+    def ensure_forest(self):
+        if self.forest is None:
+            self.forest_assets = ForestAssets(self.ctx)
+            self.forest = ForestEnv(self.ctx, self.forest_assets, seed=self.forest_seed)
+        return self.forest
+
+    def regenerate_forest(self, seed):
+        self.ensure_forest().release()
+        self.forest_seed = seed
+        self.forest = ForestEnv(self.ctx, self.forest_assets, seed=seed)
 
     def regenerate_maze(self, seed):
         self.wall_maze.release()
         self.wall_maze = WallMaze(self.ctx, seed=seed)
 
     def spawn(self, mode):
-        return self.wall_maze.spawn if mode == ENV_WALLS else BUILDING_SPAWN
+        if mode == ENV_WALLS:
+            return self.wall_maze.spawn
+        if mode == ENV_FOREST:
+            return self.ensure_forest().spawn
+        return BUILDING_SPAWN
 
     def overview_camera(self, mode):
         if mode == ENV_WALLS:
             return self.wall_maze.overview_camera
+        if mode == ENV_FOREST:
+            return self.ensure_forest().overview_camera
         return WORLD_CAMERA_POSITION, WORLD_CAMERA_TARGET
 
+    def target(self):
+        """Cible de l'environnement actif, ou None."""
+        if self.building_mode == ENV_WALLS:
+            return self.wall_maze.target
+        if self.building_mode == ENV_FOREST and self.forest is not None:
+            return self.forest.target
+        return None
+
     def target_items(self):
-        """Repère vert de la cible (environnement murs), pour les vues extérieures."""
-        if self.building_mode != ENV_WALLS:
+        """Repère vert de la cible (murs, forêt), pour les vues extérieures."""
+        target = self.target()
+        if target is None:
             return []
-        return [(self.target_vao, translation(*self.wall_maze.target), (0.1, 0.9, 0.2), False)]
+        return [(self.target_vao, translation(*target), (0.1, 0.9, 0.2), False)]
 
     def make_texture(self, img):
         """Convertit une image PIL en texture ModernGL avec mipmapping."""
@@ -387,6 +420,8 @@ class Scene:
             self.procedural_building.render(camera, aspect, light_dir=(-0.4, -1.0, -0.3))
         elif self.building_mode == ENV_WALLS:
             self.wall_maze.render(camera, aspect, light_dir=(-0.4, -1.0, -0.3))
+        elif self.building_mode == ENV_FOREST and self.forest is not None:
+            self.forest.render(camera, aspect, light_dir=(-0.4, -1.0, -0.3))
 
         # 2. Rendu des objets standard (sol, sphère, drone)
         self.prog["u_proj"].write(camera.projection(aspect).T.copy().tobytes())
@@ -691,7 +726,7 @@ def tile_viewports(x0, w, h, n):
 def main():
     parser = argparse.ArgumentParser(description="Simulation de drone stéréo")
     parser.add_argument("--env", choices=sorted(ENV_NAMES), default="murs", help="environnement de départ")
-    parser.add_argument("--seed", type=int, default=0, help="graine de l'environnement « murs »")
+    parser.add_argument("--seed", type=int, default=0, help="graine des environnements « murs » et « foret »")
     args = parser.parse_args()
     start_mode = ENV_NAMES[args.env]
 
@@ -730,6 +765,9 @@ def main():
         "regen_maze": False,       # bouton « Nouveaux murs »
         "maze_spawn": scene.wall_maze.spawn,
         "maze_info": [],
+        "regen_forest": False,     # bouton « Nouvelle forêt »
+        "forest_spawn": None,
+        "forest_info": [],
     }
     last_mode = start_mode
 
@@ -753,7 +791,20 @@ def main():
             f"{counts['trop_petit']} trop petites",
         ]
 
+    def update_forest_info():
+        forest = scene.forest
+        if forest is None:
+            return
+        counts = forest.summary()
+        settings["forest_spawn"] = forest.spawn
+        settings["forest_info"] = [
+            f"Graine : {forest.seed}",
+            f"{counts['arbre']} arbres, {counts['rocher']} rochers",
+            f"{counts['buisson']} buissons",
+        ]
+
     update_env_info()
+    update_forest_info()
     onboard = set(id(c) for c in drone.cameras)
 
     state = {"captured": False, "last": None, "mouse_yaw_delta": 0.0}
@@ -899,8 +950,15 @@ def main():
             scene.regenerate_maze(settings["maze_seed"])
             update_env_info()
             last_mode = None  # force le retour au départ ci-dessous
+        if settings.get("regen_forest"):
+            settings["regen_forest"] = False
+            scene.regenerate_forest(random.randrange(100000))
+            last_mode = None
         if b_mode != last_mode:
             last_mode = b_mode
+            if b_mode == ENV_FOREST:
+                scene.ensure_forest()
+                update_forest_info()
             world_cam.position, world_cam.target = (np.array(p, dtype="f4") for p in scene.overview_camera(b_mode))
             t_pos, t_yaw = scene.spawn(b_mode)
             drone.position = np.array(t_pos, dtype="f8")
@@ -956,8 +1014,8 @@ def main():
                 f"Caméras  : {len(drone.cameras)} ({len(STEREO_PAIRS)} paires)",
                 "Contact  : OUI" if drone.contact else "Contact  : non",
             ]
-            if b_mode == ENV_WALLS:
-                d_target = float(np.linalg.norm(scene.wall_maze.target - drone.position))
+            if scene.target() is not None:
+                d_target = float(np.linalg.norm(scene.target() - drone.position))
                 info.append(f"Cible    : {d_target:5.1f} m")
             info += [
                 "",
