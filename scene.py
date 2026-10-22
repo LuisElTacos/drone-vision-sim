@@ -33,7 +33,7 @@ import numpy as np
 from building import ProceduralBuilding
 from collision import Box, Ground, Sphere
 from gltf_loader import bounds, load_glb
-from forest_env import ForestAssets, ForestEnv
+from forest_env import FOREST_DENSITY_DEFAULT, ForestAssets, ForestEnv
 from ui_panel import PANEL_WIDTH, SidePanel
 from mujoco_flight import MujocoFlight
 from walls_env import WallMaze
@@ -323,6 +323,7 @@ class Scene:
         self.forest_assets = None
         self.forest = None
         self.forest_seed = maze_seed
+        self.forest_density = FOREST_DENSITY_DEFAULT
         v, i = make_sphere(0.25)
         self.target_vao = self.make_vao(v, i)
 
@@ -348,13 +349,16 @@ class Scene:
     def ensure_forest(self):
         if self.forest is None:
             self.forest_assets = ForestAssets(self.ctx)
-            self.forest = ForestEnv(self.ctx, self.forest_assets, seed=self.forest_seed)
+            self.forest = ForestEnv(self.ctx, self.forest_assets, seed=self.forest_seed,
+                                    tree_density=self.forest_density)
         return self.forest
 
-    def regenerate_forest(self, seed):
+    def regenerate_forest(self, seed, density=None):
         self.ensure_forest().release()
         self.forest_seed = seed
-        self.forest = ForestEnv(self.ctx, self.forest_assets, seed=seed)
+        if density is not None:
+            self.forest_density = density
+        self.forest = ForestEnv(self.ctx, self.forest_assets, seed=seed, tree_density=self.forest_density)
 
     def regenerate_maze(self, seed):
         self.wall_maze.release()
@@ -728,6 +732,8 @@ def main():
         "maze_spawn": scene.wall_maze.spawn,
         "maze_info": [],
         "regen_forest": False,     # bouton « Nouvelle forêt »
+        "forest_density": FOREST_DENSITY_DEFAULT * 100.0,  # arbres / 100 m²
+        "regen_forest_density": False,
         "forest_spawn": None,
         "forest_info": [],
         "cams_on_chassis": drone.cams_on_chassis,  # False : caméras stabilisées
@@ -914,7 +920,12 @@ def main():
             last_mode = None  # force le retour au départ ci-dessous
         if settings.get("regen_forest"):
             settings["regen_forest"] = False
-            scene.regenerate_forest(random.randrange(100000))
+            scene.regenerate_forest(random.randrange(100000), settings["forest_density"] / 100.0)
+            last_mode = None
+        if settings.get("regen_forest_density"):  # même graine, nouvelle densité
+            settings["regen_forest_density"] = False
+            scene.regenerate_forest(scene.forest_seed, settings["forest_density"] / 100.0)
+            update_forest_info()
             last_mode = None
         if b_mode != last_mode:
             last_mode = b_mode

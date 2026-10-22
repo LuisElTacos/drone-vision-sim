@@ -145,6 +145,10 @@ class SidePanel:
                 btn_w = PANEL_WIDTH - 25
                 if imgui.button("Nouvelle forêt (graine aléatoire)", imgui.ImVec2(btn_w, 24)):
                     settings["regen_forest"] = True
+                _, settings["forest_density"] = imgui.slider_float(
+                    "Densité (arbres/100 m²)", settings["forest_density"], 1.0, 10.0, "%.1f")
+                if imgui.is_item_deactivated_after_edit():  # régénère au relâchement du slider
+                    settings["regen_forest_density"] = True
                 if imgui.button("Retour au départ##foret", imgui.ImVec2(btn_w, 24)):
                     settings["teleport"] = settings.get("forest_spawn")
                 imgui.spacing()

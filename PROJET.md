@@ -51,6 +51,7 @@ Hors vision : la génération d'obstacles et le moteur physique ne sont pas le c
 - Pilotage clavier et manette (support GLFW gamepad avec détection automatique). Contacts MuJoCo raidis (pas de 2 ms, `solref` 4 ms, marge 2 cm) et caméras 3 cm en retrait de la face avant : elles ne passent pas dans les murs. Le drone n'est pas rendu dans ses propres caméras.
 - **Deux caméras** sur la face avant du drone, parallèles (paire déjà rectifiée), fovy 60°, inclinables.
 - **Panneau latéral** (Dear ImGui) : choix des vues, bascule manette, sliders de réglage en direct (vitesse max en m/s et km/h, sensibilité lacet et caméra), sélecteur de bâtiment (Procédural / Aucun), **boutons de téléportation rapide** (Portail hangar, Grand hall, Mezzanine, Atelier, Toit), option de quadrillage du sol, télémétrie complète.
+- **Forêt** : slider « Densité (arbres/100 m²) » (1 à 10, défaut 7) dans le panneau ; la forêt est régénérée au relâchement du slider, avec la même graine (`regen_forest_density` dans scene.py). Le bouton « Nouvelle forêt » garde la densité choisie. Au-delà de ~9, le placement sature (distance minimale entre troncs 3,2 m).
 - Slides des cours 1 à 4 récupérées depuis Moodle (`Docs/Slides`).
 - Analyse de l'approche vision : `Docs/Approche_vision_drone.md`.
 

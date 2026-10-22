@@ -104,6 +104,7 @@ PINE_SCALE = (11.0, 14.0)        # hauteur des pins (m)
 PINE_TRUNK_RADIUS = 0.016        # rayon du fût vers 15 % de la hauteur (au-dessus de l'évasement)
 PINE_HEIGHT = 1.0
 PINE_FOLIAGE = [(0.22, 0.6, 0.115), (0.6, 1.0, 0.075)]  # (y min, y max, rayon) des cylindres de feuillage
+FOREST_DENSITY_DEFAULT = 0.07     # arbres par m²
 TREE_SPACING = 1.6               # demi-distance minimale entre deux troncs (m)
 
 
@@ -189,7 +190,7 @@ class ForestAssets:
 
 
 class ForestEnv:
-    def __init__(self, ctx, assets, seed=0, origin=(-80.0, 0.0, 0.0), size=50.0, tree_density=0.07):
+    def __init__(self, ctx, assets, seed=0, origin=(-80.0, 0.0, 0.0), size=50.0, tree_density=FOREST_DENSITY_DEFAULT):
         self.ctx = ctx
         self.assets = assets
         self.seed = int(seed)
