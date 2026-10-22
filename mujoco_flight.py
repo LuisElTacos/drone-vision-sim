@@ -22,9 +22,9 @@ MASS = 0.377               # masse de l'Avata 2 (kg)
 THRUST_TO_WEIGHT = 3.0     # poussée max totale / poids
 YAW_COEF = 0.015           # couple de lacet / poussée d'un rotor (m)
 TIMESTEP = 0.002           # pas de physique (s), petit pour des contacts raides
-TILT_MAX = math.radians(30.0)   # inclinaison max, proche des DJI en évitement d'obstacles
+TILT_MAX = math.radians(40.0)   # inclinaison max par défaut (réglable) ; elle limite aussi le freinage : a_max = g·tan(inclinaison)
 ACC_MAX = 15.0             # accélération horizontale demandée max (m/s²)
-KV, KI = 5.0, 0.8         # gains vitesse : proportionnel (1/s) et intégral (compense la traînée)
+KV, KI = 8.0, 0.8         # gains vitesse : proportionnel (1/s) et intégral (compense la traînée)
 I_MAX = 2.0                # borne du terme intégral (m/s²)
 KR, KW = 300.0, 30.0       # gains attitude (multipliés par l'inertie)
 YAW_ERR_MAX = math.radians(60.0)
@@ -122,6 +122,7 @@ class MujocoFlight:
         mujoco.mj_forward(self.model, self.data)
 
     def _init_controller(self):
+        self.kv, self.ki, self.tilt_max = KV, KI, TILT_MAX   # réglables en direct depuis le panneau
         m = self.model
         Ri = np.zeros(9)
         mujoco.mju_quat2Mat(Ri, m.body_iquat[self.bid])
@@ -177,14 +178,14 @@ class MujocoFlight:
         R = self.data.xmat[self.bid].reshape(3, 3)
         v = self.data.qvel[:3]
         w = self.data.qvel[3:6]   # vitesse angulaire en repère corps
-        self.v_int = np.clip(self.v_int + KI * (v_des - v) * TIMESTEP, -I_MAX, I_MAX)
-        a = KV * (v_des - v) + self.v_int
+        self.v_int = np.clip(self.v_int + self.ki * (v_des - v) * TIMESTEP, -I_MAX, I_MAX)
+        a = self.kv * (v_des - v) + self.v_int
         a_h = np.linalg.norm(a[:2])
         if a_h > ACC_MAX:
             a[:2] *= ACC_MAX / a_h
         f_des = MASS * (a + np.array([0.0, 0.0, G]))
         f_des[2] = max(f_des[2], 0.2 * MASS * G)
-        horiz, lim = np.linalg.norm(f_des[:2]), f_des[2] * math.tan(TILT_MAX)
+        horiz, lim = np.linalg.norm(f_des[:2]), f_des[2] * math.tan(self.tilt_max)
         if horiz > lim:
             f_des[:2] *= lim / horiz
         b3 = f_des / np.linalg.norm(f_des)

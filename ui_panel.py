@@ -81,6 +81,15 @@ class SidePanel:
                 "##yaw_sens", float(yaw_val), 0.2, 3.0, "x%.2f"
             )
 
+            # Contrôleur de vitesse : réactivité aux changements de direction et freinage
+            for key, label, lo, hi, fmt in (
+                    ("ctrl_kv", "Réactivité (gain vitesse) :", 1.0, 15.0, "%.1f /s"),
+                    ("ctrl_ki", "Gain intégral :", 0.0, 3.0, "%.2f"),
+                    ("ctrl_tilt", "Inclinaison max / freinage :", 10.0, 60.0, "%.0f °")):
+                imgui.text(label)
+                imgui.set_next_item_width(-1)
+                _, settings[key] = imgui.slider_float("##" + key, float(settings[key]), lo, hi, fmt)
+
             # Sensibilité caméra
             cam_val = settings.get("cam_sens", 1.0)
             imgui.text("Sensibilité caméra :")

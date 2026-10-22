@@ -35,6 +35,7 @@ from collision import Box, Ground, Sphere
 from gltf_loader import bounds, load_glb
 from forest_env import FOREST_DENSITY_DEFAULT, ForestAssets, ForestEnv
 from ui_panel import PANEL_WIDTH, SidePanel
+import mujoco_flight
 from mujoco_flight import MujocoFlight
 from walls_env import WallMaze
 
@@ -719,6 +720,9 @@ def main():
     # Paramètres de l'interface et du contrôle
     settings = {
         "max_speed": 8.0,          # vitesse max par défaut (m/s) -> ~29 km/h
+        "ctrl_kv": mujoco_flight.KV,   # gain proportionnel du contrôleur de vitesse (1/s)
+        "ctrl_ki": mujoco_flight.KI,   # gain intégral
+        "ctrl_tilt": math.degrees(mujoco_flight.TILT_MAX),  # inclinaison max (°), limite le freinage
         "yaw_sens": 1.0,           # sensibilité rotation lacet
         "cam_sens": 1.0,           # sensibilité caméra
         "gamepad_enabled": True,
@@ -839,6 +843,10 @@ def main():
         base_h = float(settings.get("max_speed", 8.0))
         yaw_sens = float(settings.get("yaw_sens", 1.0))
         cam_sens = float(settings.get("cam_sens", 1.0))
+
+        drone.flight.kv = float(settings["ctrl_kv"])
+        drone.flight.ki = float(settings["ctrl_ki"])
+        drone.flight.tilt_max = math.radians(float(settings["ctrl_tilt"]))
 
         # Détermination des vitesses maximales
         boost = pressed(glfw.KEY_LEFT_SHIFT)

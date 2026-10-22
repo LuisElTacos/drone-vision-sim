@@ -52,6 +52,7 @@ Hors vision : la génération d'obstacles et le moteur physique ne sont pas le c
 - **Deux caméras** sur la face avant du drone, parallèles (paire déjà rectifiée), fovy 60°, inclinables.
 - **Panneau latéral** (Dear ImGui) : choix des vues, bascule manette, sliders de réglage en direct (vitesse max en m/s et km/h, sensibilité lacet et caméra), sélecteur de bâtiment (Procédural / Aucun), **boutons de téléportation rapide** (Portail hangar, Grand hall, Mezzanine, Atelier, Toit), option de quadrillage du sol, télémétrie complète.
 - **Forêt** : slider « Densité (arbres/100 m²) » (1 à 10, défaut 7) dans le panneau ; la forêt est régénérée au relâchement du slider, avec la même graine (`regen_forest_density` dans scene.py). Le bouton « Nouvelle forêt » garde la densité choisie. Au-delà de ~9, le placement sature (distance minimale entre troncs 3,2 m).
+- **Contrôleur de vitesse réglable** (panneau « Réglages de vol ») : réactivité (KV, défaut 8, avant 5), gain intégral (KI, 0,8) et inclinaison max (défaut 40°, avant 30°). L'inclinaison limite le freinage (a_max = g·tan(inclinaison)). Arrêt depuis 8 m/s : 1,28 s -> 0,98 s avec les nouveaux défauts (test headless).
 - Slides des cours 1 à 4 récupérées depuis Moodle (`Docs/Slides`).
 - Analyse de l'approche vision : `Docs/Approche_vision_drone.md`.
 
