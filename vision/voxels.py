@@ -26,20 +26,26 @@ class VoxelMap:
         return idx*self.voxel_size+self.origin+self.voxel_size/2 #centre du voxel
     
     def raycast(self,points_world, cam_center, step_frac=0.5):
+        Nx, Ny, Nz = self.shape
         d = points_world - cam_center                      # (N, 3)  un vecteur par rayon
         length = np.linalg.norm(d, axis=1).max()                       # rayon le plus long (m)
         n_echantillonage = int(length / (self.voxel_size * step_frac)) + 1
         t = np.linspace(0, 1, n_echantillonage)[None, :, None]  # (1, n, 1)  n positions le long du rayon
         pts = cam_center + t * d[:, None, :]            # (N, n, 3)
+        
         idx = self.world_to_idx(pts) # (N, n, 3) indices
         ok = ((idx >= 0) & (idx < self.shape)).all(axis=-1)
         idx_P = self.world_to_idx(points_world)
         not_P = (idx != idx_P[:, None, :]).any(axis=-1)
-        free = np.unique(idx[ok & not_P], axis=0)
         ok_P = ((idx_P >= 0) & (idx_P < self.shape)).all(axis=-1)
-        occ = np.unique(idx_P[ok_P], axis=0)
-        return free, occ
-        
+        sel = idx[ok & not_P]
+        lin = np.unique(sel[:, 0] * (Ny * Nz) + sel[:, 1] * Nz + sel[:, 2])
+        free = np.column_stack([lin // (Ny * Nz), (lin // Nz) % Ny, lin % Nz])
+
+        selP = idx_P[ok_P]
+        linP = np.unique(selP[:, 0] * (Ny * Nz) + selP[:, 1] * Nz + selP[:, 2])
+        occ = np.column_stack([linP // (Ny * Nz), (linP // Nz) % Ny, linP % Nz])
+        return free, occ        
         
                
     
