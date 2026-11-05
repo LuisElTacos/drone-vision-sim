@@ -3,20 +3,21 @@ from scipy.ndimage import gaussian_filter, sobel, maximum_filter
 import cv2 as cv2
 
 
+def _ksize(sigma):
+    return 2 * int(4.0 * sigma + 0.5) + 1          # troncature de scipy (truncate = 4)
+
+
 def harris_function(img, sigma_d=1.0, sigma_i=1.5, k=0.04):
-    g=gaussian_filter(img, sigma_d, mode='reflect')
-    Ix=sobel(g, axis=1, mode='reflect')
-    Iy=sobel(g, axis=0, mode='reflect')
-    Ixx=Ix*Ix
-    Ixy=Ix*Iy
-    Iyy=Iy*Iy
-    Sxx=gaussian_filter(Ixx, sigma_i, mode='reflect')
-    Sxy=gaussian_filter(Ixy, sigma_i, mode='reflect')
-    Syy=gaussian_filter(Iyy, sigma_i, mode='reflect')
-    det=Sxx*Syy-Sxy*Sxy
+    img = np.ascontiguousarray(img, dtype=np.float32)
+    kd, ki = _ksize(sigma_d), _ksize(sigma_i)
+    g = cv2.GaussianBlur(img, (kd, kd), sigma_d, borderType=cv2.BORDER_REFLECT)
+    Ix = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3, borderType=cv2.BORDER_REFLECT)
+    Iy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3, borderType=cv2.BORDER_REFLECT)
+    Sxx = cv2.GaussianBlur(Ix * Ix, (ki, ki), sigma_i, borderType=cv2.BORDER_REFLECT)    
+    Sxy = cv2.GaussianBlur(Ix * Iy, (ki, ki), sigma_i, borderType=cv2.BORDER_REFLECT)
+    Syy = cv2.GaussianBlur(Iy * Iy, (ki, ki), sigma_i, borderType=cv2.BORDER_REFLECT)
     trace=Sxx+Syy
-    R=det-k*trace**2
-    return R
+    return Sxx*Syy-Sxy*Sxy-k*trace**2  
 
 def detect_corners(R, rel_thresh=0.01, nms=5, max_n=500, border=6, grid_cells=(6,8)):
     M=float(R.max())
@@ -24,7 +25,7 @@ def detect_corners(R, rel_thresh=0.01, nms=5, max_n=500, border=6, grid_cells=(6
     if M <= 0.0:
         return np.empty((0, 3), dtype=np.float32)
     mask_thresh = R > (rel_thresh * M) ## garde uniquement les R au-dessus d'un certain seuil
-    mask_nms = R == maximum_filter(R, size=nms, mode="constant", cval=-np.inf) ## Supprime les nom-maximum locaux
+    mask_nms = R == cv2.dilate(R, np.ones((nms, nms), np.uint8))  ## Supprime les non-maxima locaux
     mask_border = np.zeros((N, P), dtype=bool) ## Supprime les points trop près des bords
     mask_border[border : N - border, border : P - border] = True
     candidates=mask_thresh & mask_nms & mask_border
@@ -45,10 +46,11 @@ def detect_corners(R, rel_thresh=0.01, nms=5, max_n=500, border=6, grid_cells=(6
     cell_ids = lignes_bins * n_cols + col_bins ## donne l'identifiant de la cellule de chaque pixel conservé
 
     selected=[]
-    for cell_id in np.unique(cell_ids):
-        in_cell = np.where(cell_ids == cell_id)[0]
-        top_in_cell = in_cell[np.argsort(-scores[in_cell])[:pts_par_cell]]
-        selected.extend(top_in_cell)
+    order = np.lexsort((-scores, cell_ids))            # cellule croissante, puis score décroissant
+    cell_ids_tries = cell_ids[order]                   # numéros de cellule dans cet ordre
+    first = np.searchsorted(cell_ids_tries, cell_ids_tries)  # indice du 1er coin de sa cellule
+    rank = np.arange(len(order)) - first               # rang du coin dans sa cellule
+    selected = order[rank < pts_par_cell]              # les pts_par_cell meilleurs de chaque cellule
 
     selected = np.array(selected, dtype=np.int64)
 

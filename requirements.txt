@@ -7,3 +7,4 @@ mujoco
 matplotlib
 scipy
 opencv-python
+numba>=0.60

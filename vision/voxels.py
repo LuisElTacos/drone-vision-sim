@@ -1,51 +1,68 @@
 import numpy as np
+from numba import njit
 
+@njit(cache=True)
+def _integrate(L, seen_free, seen_occ, stamp, pts, c, t, origin, vs, val_free, val_occ):
+    Nx, Ny, Nz = L.shape
+    n = pts.shape[0]
+    pidx = np.empty((n, 3), np.int64)
+    for r in range(n):
+        for a in range(3):
+            pidx[r, a] = np.int64(np.floor((pts[r, a] - origin[a]) / vs))
+    # 1. voxels traversés (hors voxel du point), chacun une seule fois
+    for r in range(n):
+        d0 = pts[r, 0] - c[0]
+        d1 = pts[r, 1] - c[1]
+        d2 = pts[r, 2] - c[2]
+        for s in range(len(t)):
+            i = np.int64(np.floor((c[0] + t[s] * d0 - origin[0]) / vs))
+            j = np.int64(np.floor((c[1] + t[s] * d1 - origin[1]) / vs))
+            k = np.int64(np.floor((c[2] + t[s] * d2 - origin[2]) / vs))
+            if i < 0 or j < 0 or k < 0 or i >= Nx or j >= Ny or k >= Nz:
+                continue
+            if i == pidx[r, 0] and j == pidx[r, 1] and k == pidx[r, 2]:
+                continue
+            if seen_free[i, j, k] != stamp:
+                seen_free[i, j, k] = stamp
+                L[i, j, k] += val_free
+    # 2. voxels des points
+    for r in range(n):
+        i, j, k = pidx[r, 0], pidx[r, 1], pidx[r, 2]
+        if i < 0 or j < 0 or k < 0 or i >= Nx or j >= Ny or k >= Nz:
+            continue
+        if seen_occ[i, j, k] != stamp:
+            seen_occ[i, j, k] = stamp
+            L[i, j, k] += val_occ
+            
 class VoxelMap:
     def __init__(self, origin, size_m, voxel_size):
         self.shape = np.ceil(np.asarray(size_m) / voxel_size).astype(int)
         self.map = np.zeros(self.shape,dtype=np.float32)
         self.origin=origin
         self.voxel_size=voxel_size
+        self._seen_free = np.zeros(self.shape, np.int32)
+        self._seen_occ = np.zeros(self.shape, np.int32)
+        self._stamp = 0
         
-    def integrate(self, points_world, cam_center, max_range=15.0,val_free=-0.4,val_occ=0.85):
+    def integrate(self, points_world, cam_center, max_range=15.0,val_free=-0.4,val_occ=0.85, step_frac=0.5):
         cam_center = np.asarray(cam_center, float)
         dist = np.linalg.norm(points_world - cam_center, axis=1)
-        points_world = points_world[dist <= max_range]
-        if len(points_world) == 0:
+        pts = np.ascontiguousarray(points_world[dist <= max_range], dtype=np.float64)
+        if len(pts) == 0:
             return
-        free, occ = self.raycast(points_world, cam_center)
-        self.map[free[:, 0], free[:, 1], free[:, 2]] += val_free
-        self.map[occ[:, 0], occ[:, 1], occ[:, 2]] += val_occ
+        length = np.linalg.norm(pts - cam_center, axis=1).max()
+        n_ech = int(length / (self.voxel_size * step_frac)) + 1
+        t = np.linspace(0, 1, n_ech)
+        self._stamp += 1
+        _integrate(self.map, self._seen_free, self._seen_occ, self._stamp, pts, cam_center, t, np.asarray(self.origin, np.float64), float(self.voxel_size), np.float32(val_free), np.float32(val_occ))
         np.clip(self.map, -2.0, 3.5, out=self.map)
-               
-               
+          
     def world_to_idx(self,p):
         return np.floor((p - self.origin) / self.voxel_size).astype(int) 
     
     def idx_to_world(self,idx):
         return idx*self.voxel_size+self.origin+self.voxel_size/2 #centre du voxel
-    
-    def raycast(self,points_world, cam_center, step_frac=0.5):
-        Nx, Ny, Nz = self.shape
-        d = points_world - cam_center                      # (N, 3)  un vecteur par rayon
-        length = np.linalg.norm(d, axis=1).max()                       # rayon le plus long (m)
-        n_echantillonage = int(length / (self.voxel_size * step_frac)) + 1
-        t = np.linspace(0, 1, n_echantillonage)[None, :, None]  # (1, n, 1)  n positions le long du rayon
-        pts = cam_center + t * d[:, None, :]            # (N, n, 3)
-        
-        idx = self.world_to_idx(pts) # (N, n, 3) indices
-        ok = ((idx >= 0) & (idx < self.shape)).all(axis=-1)
-        idx_P = self.world_to_idx(points_world)
-        not_P = (idx != idx_P[:, None, :]).any(axis=-1)
-        ok_P = ((idx_P >= 0) & (idx_P < self.shape)).all(axis=-1)
-        sel = idx[ok & not_P]
-        lin = np.unique(sel[:, 0] * (Ny * Nz) + sel[:, 1] * Nz + sel[:, 2])
-        free = np.column_stack([lin // (Ny * Nz), (lin // Nz) % Ny, lin % Nz])
-
-        selP = idx_P[ok_P]
-        linP = np.unique(selP[:, 0] * (Ny * Nz) + selP[:, 1] * Nz + selP[:, 2])
-        occ = np.column_stack([linP // (Ny * Nz), (linP // Nz) % Ny, linP % Nz])
-        return free, occ        
+         
         
                
     
