@@ -4,3 +4,6 @@ numpy
 pillow
 imgui-bundle
 mujoco
+matplotlib
+scipy
+opencv-python
