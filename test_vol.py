@@ -2,7 +2,7 @@
 
 Chaîne par image traitée (img-par-s fois par seconde simulée, 8 par défaut) :
   capture des 12 caméras -> pour chaque paire : coins (Harris) -> appariement le long des lignes
-  (match_along_rows_ref) -> triangulation -> VoxelMap.integrate_multi (toutes les paires, une
+  (match_along_rows) -> triangulation -> VoxelMap.integrate_multi (toutes les paires, une
   seule mise à jour par voxel) -> classify -> A* vers la cible.
 Entre deux images, la physique MuJoCo avance par pas de --dt-phys et vision/follow.py transforme
 le dernier chemin A* en commande (vitesse + vitesse de lacet). Avec la vue à 360°, follow est

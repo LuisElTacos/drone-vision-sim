@@ -1,7 +1,7 @@
 """Perception pour les 12 caméras (6 paires stéréo, voir scene.STEREO_PAIRS).
 
 Chaque paire est traitée comme la paire frontale d'avant : coins de Harris dans l'image gauche ->
-appariement le long des lignes (match_along_rows_ref, version de référence) -> triangulation
+appariement le long des lignes (match_along_rows) -> triangulation
 dans le repère de la caméra gauche puis passage en repère monde. Les points de toutes les paires
 s'intègrent ensuite dans la même VoxelMap avec VoxelMap.integrate_multi.
 """
@@ -11,7 +11,7 @@ import time
 import numpy as np
 
 from vision.corners import harris_function, detect_corners
-from vision.matching import match_along_rows_ref, to_gray
+from vision.matching import match_along_rows, to_gray
 from vision.triangulation import triangulate
 
 
@@ -19,16 +19,17 @@ def perceive_pair(imgL, imgR, K, B, R, C, corner_kw=None, match_kw=None):
     """Une paire stéréo rectifiée.
 
     corner_kw : arguments de detect_corners (rel_thresh, max_n, grid_cells, ...)
-    match_kw  : arguments de match_along_rows_ref (min_zncc, ratio, ...)
+    match_kw  : arguments de match_along_rows (min_zncc, ratio, ...)
     Retourne P_w (N, 3) points monde valides, ptsL (N, 2) pixels gauches, Z (N,) profondeurs (m),
     n_coins, et les temps (coins, appariement, triangulation) en s.
     """
     corner_kw = corner_kw or {}
     match_kw = match_kw or {}
     t0 = time.perf_counter()
-    cL = detect_corners(harris_function(to_gray(imgL)), **corner_kw)
+    gL, gR = to_gray(imgL), to_gray(imgR)
+    cL = detect_corners(harris_function(gL), **corner_kw)
     t1 = time.perf_counter()
-    ptsL, ptsR, _ = match_along_rows_ref(imgL, imgR, cL, **match_kw)
+    ptsL, ptsR, _ = match_along_rows(imgL, imgR, cL, grayL=gL, grayR=gR, **match_kw)
     t2 = time.perf_counter()
     P_w, ok = triangulate(ptsL[:, 0], ptsL[:, 1], ptsR[:, 0], ptsR[:, 1], K, B, R, C)
     t3 = time.perf_counter()

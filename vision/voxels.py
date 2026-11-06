@@ -2,14 +2,16 @@ import numpy as np
 from numba import njit
 
 @njit(cache=True)
-def _integrate(L, seen_free, seen_occ, stamp, pts, c, t, origin, vs, val_free, val_occ):
+def _integrate(L, seen_free, seen_occ, stamp, pts, c, t, origin, vs, val_free, val_occ, occ_lock):
     Nx, Ny, Nz = L.shape
     n = pts.shape[0]
     pidx = np.empty((n, 3), np.int64)
     for r in range(n):
         for a in range(3):
             pidx[r, a] = np.int64(np.floor((pts[r, a] - origin[a]) / vs))
-    # 1. voxels traversés (hors voxel du point), chacun une seule fois
+    blocked_ray = np.zeros(n, np.bool_)
+    # 1. voxels traversés (hors voxel du point), chacun une seule fois ; un rayon s'arrête
+    #    sur un voxel occupé de façon sûre (L > occ_lock) au lieu de le creuser
     for r in range(n):
         d0 = pts[r, 0] - c[0]
         d1 = pts[r, 1] - c[1]
@@ -22,11 +24,16 @@ def _integrate(L, seen_free, seen_occ, stamp, pts, c, t, origin, vs, val_free, v
                 continue
             if i == pidx[r, 0] and j == pidx[r, 1] and k == pidx[r, 2]:
                 continue
+            if L[i, j, k] > occ_lock:
+                blocked_ray[r] = True    # le rayon traverse une surface sûre : point incohérent avec la carte
+                break
             if seen_free[i, j, k] != stamp:
                 seen_free[i, j, k] = stamp
                 L[i, j, k] += val_free
     # 2. voxels des points
     for r in range(n):
+        if blocked_ray[r]:
+            continue
         i, j, k = pidx[r, 0], pidx[r, 1], pidx[r, 2]
         if i < 0 or j < 0 or k < 0 or i >= Nx or j >= Ny or k >= Nz:
             continue
@@ -44,11 +51,12 @@ class VoxelMap:
         self._seen_occ = np.zeros(self.shape, np.int32)
         self._stamp = 0
         
-    def integrate(self, points_world, cam_center, max_range=15.0,val_free=-0.4,val_occ=0.85, step_frac=0.5):
+    def integrate(self, points_world, cam_center, max_range=15.0,val_free=-0.4,val_occ=0.85, step_frac=0.5, occ_lock=2.0):
         self.integrate_multi([points_world], [cam_center], max_range=max_range, val_free=val_free,
-                             val_occ=val_occ, step_frac=step_frac)
+                             val_occ=val_occ, step_frac=step_frac, occ_lock=occ_lock)
 
-    def integrate_multi(self, points_list, centers, max_range=15.0, val_free=-0.4, val_occ=0.85, step_frac=0.5):
+    def integrate_multi(self, points_list, centers, max_range=15.0, val_free=-0.4, val_occ=0.85, step_frac=0.5,
+                        occ_lock=2.0):
         """Plusieurs paires stéréo vues au même instant : points_list[p] (N_p, 3) vus depuis centers[p].
 
         Un seul tampon pour toutes les paires : dans une image, chaque voxel reçoit au plus une
@@ -68,7 +76,7 @@ class VoxelMap:
             n_ech = int(length / (self.voxel_size * step_frac)) + 1
             t = np.linspace(0, 1, n_ech)
             _integrate(self.map, self._seen_free, self._seen_occ, self._stamp, pts, cam_center, t, origin,
-                       float(self.voxel_size), np.float32(val_free), np.float32(val_occ))
+                       float(self.voxel_size), np.float32(val_free), np.float32(val_occ), np.float32(occ_lock))
         np.clip(self.map, -2.0, 3.5, out=self.map)
 
     def world_to_idx(self,p):
