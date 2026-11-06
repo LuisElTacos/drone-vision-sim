@@ -92,7 +92,7 @@ def plan(vm, C, goal_w, args):
     """classify + A* de C vers goal_w. Retourne (chemin monde (N, 3) ou None, infos)."""
     t0 = time.perf_counter()
     blocked, cost_extra, j_min, libre, dist = classify(vm, args.ymin, args.ymax, args.rayon + args.marge,
-                                                       k_unk=args.k_unk, k_prox=args.k_prox, details=True,
+                                                       k_unk=args.k_unk, k_prox=args.k_prox, d_secu=args.d_secu, details=True,
                                                        r_v=args.rayon_v + args.marge)
     t1 = time.perf_counter()
     nx, nj, nz = blocked.shape
@@ -237,6 +237,8 @@ def main():
     ap.add_argument("--lookahead", type=float, default=None)
     ap.add_argument("--a-frein", type=float, default=None)
     ap.add_argument("--v-min", type=float, default=None)
+    ap.add_argument("--marge-follow", type=float, default=None, help="marge de follow : distance gardée avant le 1er point non libre (m)")
+    ap.add_argument("--d-secu-follow", type=float, default=None, help="d_secu de follow : ralentit sous cette distance aux obstacles (m)")
     # vision / planification (par paire stéréo)
     ap.add_argument("--W", type=int, default=865)
     ap.add_argument("--H", type=int, default=650)
@@ -255,6 +257,7 @@ def main():
     ap.add_argument("--marge", type=float, default=0.08, help="marge dure autour du drone (m) ; l éloignement vient du coût d_secu de classify")
     ap.add_argument("--k-unk", type=float, default=CLASSIFY_DEF["k_unk"], help="défaut : celui de classify")
     ap.add_argument("--k-prox", type=float, default=CLASSIFY_DEF["k_prox"], help="défaut : celui de classify")
+    ap.add_argument("--d-secu", type=float, default=CLASSIFY_DEF["d_secu"], help="d_secu de classify (coût de proximité), défaut : celui de classify")
     ap.add_argument("--w", type=float, default=2.0)
     ap.add_argument("--save", default=None,
                     help="dossier de sortie (défaut : sorties_test_vol/<env> à côté de test_vol.py)")
@@ -262,7 +265,8 @@ def main():
     args = ap.parse_args()
     # seuls les paramètres donnés en ligne de commande remplacent les défauts de follow
     follow_kw = {k: v for k, v in dict(v_max=args.v_max, lookahead=args.lookahead,
-                                       a_frein=args.a_frein, v_min=args.v_min).items() if v is not None}
+                                       a_frein=args.a_frein, v_min=args.v_min, marge=args.marge_follow,
+                                       d_secu=args.d_secu_follow).items() if v is not None}
     follow_kw["omni"] = not args.face
     follow_eff = {**FOLLOW_DEF, **follow_kw}
     corner_kw = dict(rel_thresh=args.seuil, max_n=args.max_coins, grid_cells=tuple(args.grille))
