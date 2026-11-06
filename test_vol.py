@@ -240,7 +240,7 @@ def main():
     # vision / planification (par paire stéréo)
     ap.add_argument("--W", type=int, default=865)
     ap.add_argument("--H", type=int, default=650)
-    ap.add_argument("--max-coins", type=int, default=5000, help="coins max par image gauche")
+    ap.add_argument("--max-coins", type=int, default=500, help="coins max par image gauche (défaut de detect_corners)")
     ap.add_argument("--seuil", type=float, default=1e-6)
     ap.add_argument("--grille", type=int, nargs=2, default=(12, 16))
     ap.add_argument("--zncc", type=float, default=0.8)
