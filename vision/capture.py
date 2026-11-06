@@ -14,6 +14,17 @@ class Frame:
     Cs: list[np.ndarray]       # N × (3,) float, position caméra dans le monde (m)
     K: np.ndarray              # (3, 3) float, intrinsèques communes
     t: float                   # temps de simulation (s)
+
+    # Caméras rangées par paires stéréo (gauche 2k, droite 2k+1), dans l'ordre de scene.STEREO_PAIRS
+    @property
+    def n_pairs(self) -> int:
+        return len(self.images) // 2
+
+    def pair(self, k):
+        """Paire stéréo k : imgL, imgR, base B (m), rotation R et centre C de la caméra gauche."""
+        iL, iR = 2 * k, 2 * k + 1
+        B = float(np.linalg.norm(self.Cs[iR] - self.Cs[iL]))
+        return self.images[iL], self.images[iR], B, self.Rs[iL], self.Cs[iL]
     
 
 class StereoCapture:

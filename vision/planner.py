@@ -1,9 +1,9 @@
 import numpy as np
 import heapq as h
 import math
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import distance_transform_edt, maximum_filter1d
 
-def classify(vmap, y_min, y_max, r_total, k_unk=0.3, k_prox=3.0, seuil_occ=0.5, seuil_free=0.2, d_secu=0.8, details=False):    
+def classify(vmap, y_min, y_max, r_total, k_unk=0.3, k_prox=3.0, seuil_occ=2.0, seuil_free=0.2, d_secu=1.2, details=False, r_v=None, d_unk=0.5):    
     vs = vmap.voxel_size
 
     # 1. tranche d'altitude : indices de couches j_min .. j_max (axe 1 = y vertical)
@@ -22,7 +22,21 @@ def classify(vmap, y_min, y_max, r_total, k_unk=0.3, k_prox=3.0, seuil_occ=0.5, 
         dist = np.full(L.shape, np.inf)
 
     # 4. sorties
-    blocked = dist < r_total                     # obstacle gonflé
+    # Distances de centre à centre : la surface réelle peut être jusqu'à vs/2 plus près que le centre
+    # du voxel occupé, d'où le gonflement r + vs/2 (sinon un trou d'un voxel laisse passer le drone).
+    if r_v is None:
+        blocked = dist < r_total + vs / 2        # gonflement sphérique
+    elif occ.any():
+        # gonflement cylindrique : rayon horizontal r_total (le drone tourne en lacet), demi-hauteur r_v
+        nv = max(1, int(np.floor((r_v + vs / 2) / vs)))   # au moins une couche (inclinaison du drone)
+        occ_v = maximum_filter1d(occ.astype(np.uint8), size=2 * nv + 1, axis=1) > 0 if nv > 0 else occ
+        dist_h = distance_transform_edt(~occ_v, sampling=(vs, 1e6, vs))   # distance horizontale, couche par couche
+        blocked = dist_h < r_total + vs / 2
+    else:
+        blocked = np.zeros(L.shape, bool)
+    # L'inconnu collé à un obstacle n'est pas traversable : un trou d'un voxel dans un mur débouche
+    # sur de l'inconnu, alors qu'une vraie ouverture est vue libre de part en part.
+    blocked |= unknown & (dist < d_unk)
     prox = np.clip((d_secu - dist) / d_secu, 0, 1) ** 2
     cost_extra = (k_unk * unknown + k_prox * prox).astype(np.float32)
     if details:                                  # pour follow : état franchement libre et distance aux obstacles

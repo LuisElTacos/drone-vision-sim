@@ -45,18 +45,32 @@ class VoxelMap:
         self._stamp = 0
         
     def integrate(self, points_world, cam_center, max_range=15.0,val_free=-0.4,val_occ=0.85, step_frac=0.5):
-        cam_center = np.asarray(cam_center, float)
-        dist = np.linalg.norm(points_world - cam_center, axis=1)
-        pts = np.ascontiguousarray(points_world[dist <= max_range], dtype=np.float64)
-        if len(pts) == 0:
-            return
-        length = np.linalg.norm(pts - cam_center, axis=1).max()
-        n_ech = int(length / (self.voxel_size * step_frac)) + 1
-        t = np.linspace(0, 1, n_ech)
+        self.integrate_multi([points_world], [cam_center], max_range=max_range, val_free=val_free,
+                             val_occ=val_occ, step_frac=step_frac)
+
+    def integrate_multi(self, points_list, centers, max_range=15.0, val_free=-0.4, val_occ=0.85, step_frac=0.5):
+        """Plusieurs paires stéréo vues au même instant : points_list[p] (N_p, 3) vus depuis centers[p].
+
+        Un seul tampon pour toutes les paires : dans une image, chaque voxel reçoit au plus une
+        mise à jour « libre » et une « occupé », même s'il est vu par plusieurs paires (comme integrate
+        pour une seule paire)."""
         self._stamp += 1
-        _integrate(self.map, self._seen_free, self._seen_occ, self._stamp, pts, cam_center, t, np.asarray(self.origin, np.float64), float(self.voxel_size), np.float32(val_free), np.float32(val_occ))
+        origin = np.asarray(self.origin, np.float64)
+        for points_world, cam_center in zip(points_list, centers):
+            cam_center = np.asarray(cam_center, float)
+            if len(points_world) == 0:
+                continue
+            dist = np.linalg.norm(points_world - cam_center, axis=1)
+            pts = np.ascontiguousarray(points_world[dist <= max_range], dtype=np.float64)
+            if len(pts) == 0:
+                continue
+            length = np.linalg.norm(pts - cam_center, axis=1).max()
+            n_ech = int(length / (self.voxel_size * step_frac)) + 1
+            t = np.linspace(0, 1, n_ech)
+            _integrate(self.map, self._seen_free, self._seen_occ, self._stamp, pts, cam_center, t, origin,
+                       float(self.voxel_size), np.float32(val_free), np.float32(val_occ))
         np.clip(self.map, -2.0, 3.5, out=self.map)
-          
+
     def world_to_idx(self,p):
         return np.floor((p - self.origin) / self.voxel_size).astype(int) 
     
