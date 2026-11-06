@@ -3,7 +3,7 @@ import numpy as np
 
 
 def follow(path_w, libre, dist, pos, yaw_deg, goal_w, v_max=5, lookahead=1.3, a_frein=2.5,
-           v_up_max=2, k_yaw=3.0, yaw_rate_max=90.0, marge=1.2, d_secu=1.5, v_min=0.0, v_prox_min=0.5,
+           v_up_max=2, k_yaw=3.0, yaw_rate_max=90.0, marge=1.2, d_secu=1.5, v_min=0.3, v_prox_min=0.5,
            explore_rate=30.0, omni=False):
     """Commande de suivi du chemin A* pour le contrôleur en cascade MuJoCo (appelée à chaque pas de physique).
 
