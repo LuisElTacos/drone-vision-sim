@@ -3,6 +3,14 @@ import cv2
 from numba import njit, prange
 
 
+def to_gray(img):
+    """Image RGB uint8 (H, W, 3) -> niveaux de gris float32 dans [0, 1]."""
+    if img.ndim == 2:
+        return img.astype(np.float32) / (255.0 if img.dtype == np.uint8 else 1.0)
+    rgb = img[..., :3].astype(np.float32) / 255.0
+    return rgb @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+
+
 def _normalize_patch(patch: np.ndarray, eps: float = 1e-5) -> tuple[np.ndarray | None, float]:
     p_flat = patch.astype(np.float32).ravel()
     p_centered = p_flat - np.mean(p_flat)
