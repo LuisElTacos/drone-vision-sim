@@ -11,18 +11,8 @@ def to_gray(img):
     return rgb @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
 
-def _normalize_patch(patch: np.ndarray, eps: float = 1e-5) -> tuple[np.ndarray | None, float]:
-    p_flat = patch.astype(np.float32).ravel()
-    p_centered = p_flat - np.mean(p_flat)
-    norm = float(np.linalg.norm(p_centered))
-    if norm < eps:
-        return None, 0.0
-    return (p_centered / norm), norm
-
-
 def _window_norms(img, half):
-    """Norme de (fenêtre - moyenne) centrée en chaque pixel, par images intégrales (0 sur les bords).
-    Remplace le calcul de norm_r fenêtre par fenêtre de la version d'origine."""
+    """Norme de (fenêtre - moyenne) centrée en chaque pixel, par images intégrales (0 sur les bords)."""
     S, SQ = cv2.integral2(np.ascontiguousarray(img, dtype=np.float32), sdepth=cv2.CV_64F, sqdepth=cv2.CV_64F)
     return _norms_kernel(S, SQ, img.shape[0], img.shape[1], 2 * half + 1)
 

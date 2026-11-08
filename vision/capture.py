@@ -25,9 +25,9 @@ class StereoCapture:
         self.H=H
         self.scene = scene
         for _ in cams:
-            color=ctx.renderbuffer((W, H))
-            depth=ctx.depth_texture((W,H))
-            fbo=ctx.framebuffer(color,depth)
+            color=ctx.renderbuffer((W, H)) ## alloue un boc mémoire de taille (W,H) pour le rendu couleur
+            depth=ctx.depth_texture((W,H)) ## alloue un bloc mémoire de taille (W,H) pour le rendu profondeur
+            fbo=ctx.framebuffer(color,depth) ## relie couleur et profondeur pour former l'image de taille (W,H)
             self.fbos.append(fbo)
             self.depths.append(depth)
             
@@ -44,8 +44,8 @@ class StereoCapture:
             d=np.frombuffer(depth.read(),np.float32).reshape(self.H, self.W)[::-1].copy()
             images.append(rgb)
             depths.append(d)
-            R = np.column_stack([cam.right, -cam.up, cam.forward])   # (3, 3), caméra->monde
-            C = np.array(cam.position, dtype=float)                   # (3,)
+            R = np.column_stack([cam.right, -cam.up, cam.forward])   # (3, 3), rotation caméra->monde
+            C = np.array(cam.position, dtype=float)                   # (3,) vecteur position caméra dans repère monde
             Rs.append(R)
             Cs.append(C)
         self.ctx.screen.use()

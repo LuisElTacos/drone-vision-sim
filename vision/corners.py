@@ -8,9 +8,10 @@ def _ksize(sigma):
 
 
 def harris_function(img, sigma_d=1.0, sigma_i=1.5, k=0.04):
-    img = np.ascontiguousarray(img, dtype=np.float32)
+    """ Calcule la fonction de Harris en chaque pixel de l'image img"""
+    img = np.ascontiguousarray(img, dtype=np.float32) ## nécessaire pour utiliser les fonctions de cv2
     kd, ki = _ksize(sigma_d), _ksize(sigma_i)
-    g = cv2.GaussianBlur(img, (kd, kd), sigma_d, borderType=cv2.BORDER_REFLECT)
+    g = cv2.GaussianBlur(img, (kd, kd), sigma_d, borderType=cv2.BORDER_REFLECT) ## réduction du bruit avant calcul des dérivées
     Ix = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3, borderType=cv2.BORDER_REFLECT)
     Iy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3, borderType=cv2.BORDER_REFLECT)
     Sxx = cv2.GaussianBlur(Ix * Ix, (ki, ki), sigma_i, borderType=cv2.BORDER_REFLECT)    
