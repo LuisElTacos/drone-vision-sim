@@ -3,6 +3,20 @@ from numba import njit
 
 @njit(cache=True)
 def _integrate(L, seen_free, seen_occ, stamp, pts, c, t, origin, vs, val_free, val_occ):
+    """ Intègre les points pts dans la carte de voxels L, en marquant les voxels traversés comme libres et les voxels contenant les points comme occupés.
+    Args:
+        L : carte de voxels à mettre à jour
+        seen_free : tableau avec les voxels libres vus
+        seen_occ : tableau avec les voxels occupés vus
+        stamp : compteur de mise à jour pour éviter les doublons
+        pts : points 3D monde à intégrer (N, 3)
+        c : centre de la caméra (3,)
+        t : échantillons le long des rayons (1D)
+        origin : origine du repère de la carte de voxels (3,)
+        vs : taille d'un voxel (float)
+        val_free : valeur à ajouter aux voxels libres
+        val_occ : valeur à ajouter aux voxels occupés
+    """
     Nx, Ny, Nz = L.shape
     n = pts.shape[0]
     pidx = np.empty((n, 3), np.int64)

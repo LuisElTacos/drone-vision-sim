@@ -13,12 +13,13 @@ def to_gray(img):
 
 def _window_norms(img, half):
     """Norme de (fenêtre - moyenne) centrée en chaque pixel, par images intégrales (0 sur les bords)."""
-    S, SQ = cv2.integral2(np.ascontiguousarray(img, dtype=np.float32), sdepth=cv2.CV_64F, sqdepth=cv2.CV_64F)
+    S, SQ = cv2.integral2(np.ascontiguousarray(img, dtype=np.float32), sdepth=cv2.CV_64F, sqdepth=cv2.CV_64F) ## permet d'accéder à la somme des I(j, i et la somme des carrés)
     return _norms_kernel(S, SQ, img.shape[0], img.shape[1], 2 * half + 1)
 
 
 @njit(cache=True)
 def _norms_kernel(S, SQ, H, W, w):
+    """Norme de fenêtre -moyenne pour des fenêtres de taille w×w centrées en chaque pixel, via les images intégrales S et SQ."""
     n = w * w
     h = w // 2
     out = np.zeros((H, W))
@@ -32,7 +33,7 @@ def _norms_kernel(S, SQ, H, W, w):
 
 @njit(cache=True)
 def _patch_norm(img, y, x, half):
-    """Équivalent numba de _normalize_patch : (patch centré / norme, norme) de la fenêtre centrée en (y, x)."""
+    """(patch centré / norme, norme) de la fenêtre centrée en (y, x)."""
     w = 2 * half + 1
     p = np.empty(w * w)
     m = 0.0
@@ -76,17 +77,17 @@ def _match_corners(left, right, norm_l, norm_r, xg_f_all, y_coords, d_min, d_max
     keep = np.zeros(n, dtype=np.bool_)
     for idx in prange(n):
         y = y_coords[idx]
-        if y - half < 0 or y + half >= H:
+        if y - half < 0 or y + half >= H: ## si le coin est trop proche du bord on l'ignore
             continue
 
         xg_f = xg_f_all[idx]
         xg = int(np.round(xg_f))
 
-        if xg - half < 0 or xg + half >= W:
+        if xg - half < 0 or xg + half >= W: ## si le coin est trop proche du bord on l'ignore
             continue
 
         p_l_norm, norm_val = _patch_norm(left, y, xg, half)
-        if norm_val < 1e-5:
+        if norm_val < 1e-5: 
             continue  # Patch trop uniforme
 
         d_upper = min(d_max, xg - half)
