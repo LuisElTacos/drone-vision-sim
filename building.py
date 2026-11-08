@@ -76,7 +76,9 @@ out vec4 f_color;
 
 // Générateur pseudo-aléatoire rapide
 float hash(vec2 p) {
-    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);   // sans sin() : pas de blocs d'artefact aux grandes coordonnées
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
 }
 
 // Bruit procédural pour la texture du béton
@@ -86,6 +88,83 @@ float noise(vec2 p) {
     vec2 u = f * f * (3.0 - 2.0 * f);
     return mix(mix(hash(i + vec2(0.0, 0.0)), hash(i + vec2(1.0, 0.0)), u.x),
                mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+
+
+// Bruit fractal (4 octaves)
+float fbm(vec2 p) {
+    float a = 0.5, s = 0.0;
+    for (int i = 0; i < 4; i++) {
+        s += a * noise(p);
+        p = p * 2.03 + vec2(17.3, 9.1);
+        a *= 0.5;
+    }
+    return s;
+}
+
+// Distance au bord de cellule de Voronoi (F2 - F1) : réseau de fissures irrégulier
+float voronoi_edge(vec2 p) {
+    vec2 ip = floor(p);
+    vec2 fp = fract(p);
+    float d1 = 8.0, d2 = 8.0;
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            vec2 g = vec2(float(i), float(j));
+            vec2 o = vec2(hash(ip + g), hash(ip + g + vec2(31.7, 12.3)));
+            float d = length(g + o - fp);
+            if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) { d2 = d; }
+        }
+    }
+    return d2 - d1;
+}
+
+// Vieillissement procédural d'un mur : teintes, coulures, salissures, fissures, éclats.
+// kind : 0 béton, 1 enduit, 2 bois, 3 tôle, 4 grès ; chaque mur a ses propres décalages et intensités.
+vec3 weather(vec3 col, vec2 coord, vec3 wpos, vec3 n, float kind) {
+    float wid = (abs(n.x) > 0.5) ? floor(wpos.x + 0.5) : floor(wpos.z + 0.5);
+    vec2 off = vec2(hash(vec2(wid, 1.7)), hash(vec2(wid, 8.3))) * 20.0;
+    float k_crack = 0.3 + 0.7 * hash(vec2(wid, 3.1));   // densité de fissures
+    float k_stain = 0.4 + 0.6 * hash(vec2(wid, 5.9));   // coulures / humidité
+    float k_dirt  = 0.4 + 0.6 * hash(vec2(wid, 9.4));   // saleté au pied du mur
+    vec2 p = coord + off;
+    float y = wpos.y;
+
+    // Variation de teinte à grande échelle, avec dérive chromatique
+    float tone = fbm(p * 0.22);
+    col *= 0.82 + 0.34 * tone;
+    col *= vec3(1.0 + 0.10 * (fbm(p * 0.35 + 40.0) - 0.5), 1.0, 1.0 - 0.10 * (fbm(p * 0.35 + 40.0) - 0.5));
+
+    // Zones d'humidité : taches sombres aux bords irréguliers
+    float damp = smoothstep(0.58, 0.74, fbm(p * 0.7 + 11.0));
+    col = mix(col, col * vec3(0.70, 0.67, 0.65), damp * 0.5 * k_stain);
+
+    // Coulures verticales sous la ligne de toit
+    float streak_n = noise(vec2(p.x * 4.0, p.y * 0.25)) * 0.6 + noise(vec2(p.x * 11.0, p.y * 0.6)) * 0.4;
+    float streak = smoothstep(0.58, 0.78, streak_n) * smoothstep(0.5, 4.5, y);
+    col = mix(col, col * vec3(0.66, 0.62, 0.58), streak * 0.6 * k_stain);
+
+    // Saleté et éclaboussures au pied du mur
+    float splash = smoothstep(1.0, 0.0, y + (fbm(p * 3.0) - 0.5) * 0.9);
+    col = mix(col, col * vec3(0.55, 0.50, 0.45), splash * k_dirt * 0.8);
+
+    // Fissures : réseau de Voronoi déformé, localisé en quelques zones
+    if (kind != 3.0) {
+        vec2 q = p * 0.9 + (vec2(fbm(p * 2.3), fbm(p * 2.3 + 7.0)) - 0.5) * 0.45;
+        float e = voronoi_edge(q);
+        float zone = smoothstep(0.54, 0.70, fbm(p * 0.35 + 90.0)) * k_crack;
+        float crack = (1.0 - smoothstep(0.0, 0.035, e)) * zone;
+        col = mix(col, col * 0.35, crack);
+    }
+
+    // Éclats / trous et taches claires (efflorescence)
+    float chip = smoothstep(0.84, 0.88, noise(p * 9.0 + 3.0) * 0.6 + noise(p * 23.0) * 0.4);
+    col = mix(col, col * 0.6, chip * 0.6);
+    float bloom = smoothstep(0.72, 0.80, fbm(p * 2.2 + 55.0));
+    col = mix(col, col * 0.4 + vec3(0.42), bloom * 0.35);
+
+    // Rayures / grain fin haute fréquence
+    col *= 0.93 + 0.14 * noise(p * 70.0);
+    return clamp(col, 0.0, 1.0);
 }
 
 void main() {
@@ -131,6 +210,7 @@ void main() {
 
         base = mix(block_col, mortar_col, is_mortar);
         spec = pow(max(dot(n, h), 0.0), 16.0) * 0.10;
+        base = weather(base, coord, v_world, n, 0.0);
     } else if (v_mat < 1.5) {
         // MAT 1: Acier de structure / Cadres / Poutres
         base = vec3(0.18, 0.20, 0.22);
@@ -182,6 +262,7 @@ void main() {
         float grain = (noise(coord * 45.0) - 0.5) * 0.05;
         base = vec3(0.82, 0.77, 0.68) * (0.88 + 0.18 * blot) + vec3(grain);
         spec = pow(max(dot(n, h), 0.0), 12.0) * 0.05;
+        base = weather(base, coord, v_world, n, 1.0);
     } else if (v_mat < 7.5) {
         // MAT 7: Planches de bois horizontales (18 cm)
         float ph = 0.18;
@@ -194,6 +275,7 @@ void main() {
         float gap = step(fy, 0.05);
         base = mix(wood, vec3(0.16, 0.10, 0.06), gap);
         spec = pow(max(dot(n, h), 0.0), 20.0) * 0.08;
+        base = weather(base, coord, v_world, n, 2.0);
     } else if (v_mat < 8.5) {
         // MAT 8: Tôle ondulée peinte, panneaux de 1 m, quelques traces de rouille
         float rib = abs(fract(coord.x * 5.0) - 0.5) * 2.0;
@@ -204,6 +286,7 @@ void main() {
         base = mix(paint, vec3(0.45, 0.25, 0.12), rust * 0.7);
         base = mix(base, vec3(0.12), seam);
         spec = pow(max(dot(n, h), 0.0), 40.0) * 0.30;
+        base = weather(base, coord, v_world, n, 3.0);
     } else {
         // MAT 9: Dalles de grès 60 x 40 cm en quinconce
         float tw = 0.60;
@@ -218,6 +301,7 @@ void main() {
         vec3 stone = vec3(0.72 + 0.10 * r, 0.62 + 0.08 * r, 0.45 + 0.06 * r) + vec3(grain);  // grès
         base = mix(stone, vec3(0.28, 0.27, 0.25), joint);
         spec = pow(max(dot(n, h), 0.0), 16.0) * 0.08;
+        base = weather(base, coord, v_world, n, 4.0);
     }
 
     // Éclairage hémisphérique ciel/sol + illumination intérieure de rebond

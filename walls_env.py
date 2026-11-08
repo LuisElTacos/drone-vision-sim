@@ -97,7 +97,7 @@ class WallMaze(ProceduralBuilding):
                 if kind == "trop_petit":
                     w, h = rng.uniform(0.10, 0.18), rng.uniform(0.25, 0.8)
                 else:
-                    w, h = rng.uniform(0.7, 1.6), rng.uniform(0.6, 1.4)
+                    w, h = rng.uniform(1.1, 2.2), rng.uniform(1.0, 1.9)
                 # centre dans la case, avec de la marge pour la poche éventuelle
                 margin = (slot_w - w) / 2.0 - 0.8
                 u = -half_w + (slot + 0.5) * slot_w + rng.uniform(-margin, margin)
