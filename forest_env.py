@@ -5,7 +5,7 @@
   branches supprimé, il reste le fût et les cartes d'aiguilles, qui commencent vers 22 %
   de la hauteur), répartis aléatoirement avec une distance minimale entre troncs.
 - Sol forestier procédural (terre et mousse), sans autre décor.
-- Collisions : cylindre vertical par tronc, deux cylindres pour le feuillage.
+- Collisions : cylindre vertical par tronc, tranches de cylindres pour le feuillage.
 - Départ en bordure sud, cible (coordonnée connue) en bordure nord.
 
 Tout est tiré à partir d'une graine. Les modèles et textures sont chargés une seule
@@ -103,7 +103,14 @@ void main() {
 PINE_SCALE = (11.0, 14.0)        # hauteur des pins (m)
 PINE_TRUNK_RADIUS = 0.016        # rayon du fût vers 15 % de la hauteur (au-dessus de l'évasement)
 PINE_HEIGHT = 1.0
-PINE_FOLIAGE = [(0.22, 0.6, 0.115), (0.6, 1.0, 0.075)]  # (y min, y max, rayon) des cylindres de feuillage
+# (y min, y max, rayon) des tranches de feuillage, INTÉRIEURES au visible : 600 000 points échantillonnés sur
+# les triangles, gardés si la texture est opaque ; par tranche de 0,04 de hauteur, étendue maximale visible dans
+# chacun des 12 secteurs de 30° ; rayon = 0,9 x 10e percentile de ces étendues (valeur du secteur le plus
+# maigre, le plus petit des secteurs étant ignoré), puis min sur les tranches fusionnées. La collision ne
+# dépasse donc que très rarement les aiguilles vues, et de peu.
+PINE_FOLIAGE = [(0.26, 0.30, 0.11), (0.30, 0.38, 0.093), (0.38, 0.42, 0.085), (0.42, 0.50, 0.055),
+                (0.50, 0.58, 0.058), (0.58, 0.62, 0.068), (0.62, 0.70, 0.03), (0.70, 0.74, 0.03),
+                (0.74, 0.82, 0.028), (0.82, 0.90, 0.02), (0.90, 0.94, 0.015)]
 FOREST_DENSITY_DEFAULT = 0.07     # arbres par m²
 TREE_SPACING = 1.6               # demi-distance minimale entre deux troncs (m)
 
