@@ -76,16 +76,16 @@ def compute_plane_basis_and_kind(n, inlier_pts):
     up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
     cos_up = abs(float(np.dot(n, up)))
 
-    # 1. Étiquetage
+    # Étiquetage
     if cos_up > 0.9:
-    # Plan horizontal : sol si proche de Y = 0 (ex: < 0.5m)
+    # Plan horizontal : sol si proche de Y = 0
         kind = 'sol' if abs(origin[1]) < 0.5 else 'autre'
     elif cos_up < 0.2:
         kind = 'mur'
     else:
         kind = 'autre'
 
-    # 2. Base 2D du plan (u horizontal le long du mur, v vertical)
+    # Base 2D du plan (u horizontal le long du mur, v vertical)
     u_dir = np.cross(up, n)
     norm_u = np.linalg.norm(u_dir)
     if norm_u < 1e-4:
@@ -105,14 +105,15 @@ from scipy.ndimage import binary_dilation, label
 
 
 def keep_largest_cluster_2d(pts_inliers, u, v, origin, cell_size=0.25):
-    """ Conserve uniquement les inliers de la plus grande composante pour chaque plan. 
+    """ Conserve uniquement les inliers de la plus grande composante pour chaque plan. Chaque plan est divisé en îlot 
+    de points. L'ilot le plus grand est conservé, les autres sont rejetés.
     Permet d'éviter que deux plans parallèles proches soient confondus. """
 
     K = len(pts_inliers)
     if K < 3:
         return np.arange(K, dtype=np.int64)
 
-    # 1. Coordonnées 2D locales (u_coord le long de u, v_coord le long de v)
+    # Coordonnées 2D locales au sein du plan
     pts_centered = pts_inliers - origin
     u_coords = pts_centered @ u
     v_coords = pts_centered @ v
@@ -143,7 +144,7 @@ def keep_largest_cluster_2d(pts_inliers, u, v, origin, cell_size=0.25):
     if num_features <= 1:
         return np.arange(K, dtype=np.int64)
 
-    #Décompte des points par label
+    # Décompte des points par label
     point_labels = labeled_grid[row_indices, col_indices]
 
     # On ignore le label 0 (les pixels vides) et on trouve le label le plus fréquent parmi les inliers
