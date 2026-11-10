@@ -3,7 +3,7 @@ import heapq as h
 import math
 from scipy.ndimage import distance_transform_edt
 
-def classify(vmap, y_min, y_max, r_total, k_unk=0.3, k_prox=3.0, seuil_occ=0.5, seuil_free=0.2, d_secu=0.8, details=False):    
+def classify(vmap, y_min, y_max, r_total, k_unk=0.35, k_prox=3.0, seuil_occ=0.0, seuil_free=0.0, d_secu=0.8, details=False):    
     vs = vmap.voxel_size
 
     # 1. tranche d'altitude : indices de couches j_min .. j_max (axe 1 = y vertical)
@@ -13,7 +13,7 @@ def classify(vmap, y_min, y_max, r_total, k_unk=0.3, k_prox=3.0, seuil_occ=0.5, 
 
     # 2. états
     occ = L > seuil_occ
-    unknown = (~occ) & (L > -seuil_free)             # ni occupé, ni franchement libre
+    unknown = (~occ) & (L >= -seuil_free)            # ni occupé (L > seuil_occ), ni libre (L < -seuil_free) : avec 0/0, seul L == 0 (jamais observé)
 
     # 3. distance (m) de chaque voxel au voxel occupé le plus proche
     if occ.any():

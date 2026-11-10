@@ -190,7 +190,7 @@ class ForestAssets:
 
 
 class ForestEnv:
-    def __init__(self, ctx, assets, seed=0, origin=(-80.0, 0.0, 0.0), size=50.0, tree_density=FOREST_DENSITY_DEFAULT):
+    def __init__(self, ctx, assets, seed=0, origin=(-80.0, 0.0, 0.0), size=80.0, tree_density=FOREST_DENSITY_DEFAULT):
         self.ctx = ctx
         self.assets = assets
         self.seed = int(seed)
@@ -225,7 +225,7 @@ class ForestEnv:
         h = self.size / 2.0
         ox, oz = self.origin[0], self.origin[2]
         spawn = np.array([0.0, h - 2.0])
-        self.target = self.origin + (rng.uniform(-h + 4.0, h - 4.0), 1.5, -h + 3.0)
+        self.target = self.origin + (rng.uniform(-h + 14.0, h - 14.0), 1.5, rng.uniform(-h + 14.0, -h + 26.0))  # ni au bord ni au centre
         target = np.array([self.target[0] - ox, self.target[2] - oz])
         occupied = []  # (x, z, rayon) en coordonnées locales
 
