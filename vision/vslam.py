@@ -131,14 +131,14 @@ class FrontEnd:
         self.pts = p1[ok]
         self.ids = self.ids[ok]
 
-    def renew(self, grayL):
+    def renew(self, grayL, harris=None):
         """C. Si len(pts) < n_max : coins de Harris (detect_corners), triés par score, hors bordure klt.win,
         acceptés seulement s'ils sont à > min_dist de tous les points déjà présents (masque uint8 + cv2.circle).
         Nouveaux ids = next_id..., next_id += n."""
         if len(self.pts) > self.n_max:
             return None
         corners = detect_corners(
-            harris_function(grayL),
+            harris if harris is not None else harris_function(grayL),
             rel_thresh=self.harris_seuil,
             max_n=4 * self.n_max,
             border=self.klt.win,
@@ -194,13 +194,13 @@ class FrontEnd:
             uvR[keep, 1] = self.pts[keep, 1]
         return uvR
 
-    def process(self, grayL, grayR, R_cc=None):
+    def process(self, grayL, grayR, R_cc=None, harris=None):
         """E. pyr = self.klt.pyramid(grayL) ; si prev_pyr existe : track ; renew ; prev_pyr = pyr ; stereo.
         Retourne ids, uvL, uvR."""
         pyr = self.klt.pyramid(grayL)
         if self.prev_pyr is not None and len(self.pts):
             self.track(pyr, R_cc)
-        self.renew(grayL)
+        self.renew(grayL, harris)
         self.prev_pyr = pyr
         uvR = self.stereo(grayL, grayR)
         return self.ids.copy(), self.pts.copy(), uvR
@@ -539,7 +539,7 @@ class VIO:
         for lid in [l for l in self.lm if l not in seen]:
             del self.lm[lid]
 
-    def add_frame(self, t, grayL, grayR, corners=None):
+    def add_frame(self, t, grayL, grayR, corners=None, harris=None):
         """ETAPE 7d (assemblage). 1. R_cc (gyro) -> self.front.process ; 2. créer la _Frame (la première = état
         initial vrai, clé) ou fusionner la précédente si non clé, avec la préintégration de self.pre ;
         3. réinitialiser self.pre ; 4. _init_landmarks ; 5. _optimize ; 6. _reject_outliers ; 7. décider si fr est clé ;
@@ -549,7 +549,7 @@ class VIO:
         R_cc = None
         if self.frames:
             R_cc = self.R_bc.T @ self.pre.dR.T @ self.R_bc  # caméra t-1 -> t
-        ids, uvL, uvR = self.front.process(grayL, grayR, R_cc)
+        ids, uvL, uvR = self.front.process(grayL, grayR, R_cc, harris)
         t1 = time.perf_counter()
 
         if not self.frames:

@@ -15,8 +15,112 @@ prévus mais à 0 par défaut (IMU parfait).
 import numpy as np
 
 from mujoco_flight import G
+from numba import njit
 
 G_W = np.array([0.0, -G, 0.0])
+
+
+# ---------------------------------------------------------------------------
+# Noyaux numba (njit, cache) des fonctions appelées des milliers de fois par image ; entrées float64 contiguës.
+# Les fonctions publiques ci-dessous les utilisent pour une entrée simple et restent en numpy pour les entrées batchées.
+# ---------------------------------------------------------------------------
+
+@njit(cache=True)
+def skew3(v):
+    S = np.zeros((3, 3))
+    S[0, 1] = -v[2]; S[0, 2] = v[1]
+    S[1, 0] = v[2];  S[1, 2] = -v[0]
+    S[2, 0] = -v[1]; S[2, 1] = v[0]
+    return S
+
+
+@njit(cache=True)
+def so3_exp3(w):
+    th = np.sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2])
+    K = skew3(w)
+    if th < 1e-8:
+        A = 1.0 - th ** 2 / 6
+        B = 0.5 - th ** 2 / 24
+    else:
+        A = np.sin(th) / th
+        B = (1 - np.cos(th)) / th ** 2
+    return np.eye(3) + A * K + B * (K @ K)
+
+
+@njit(cache=True)
+def so3_log3(R):
+    c = min(max((R[0, 0] + R[1, 1] + R[2, 2] - 1) / 2, -1.0), 1.0)
+    th = np.arccos(c)
+    v = np.empty(3)
+    v[0] = R[2, 1] - R[1, 2]
+    v[1] = R[0, 2] - R[2, 0]
+    v[2] = R[1, 0] - R[0, 1]
+    if th < 1e-6:
+        k = 0.5 + th ** 2 / 12
+    else:
+        k = th / (2 * np.sin(th))
+    return k * v
+
+
+@njit(cache=True)
+def right_jacobian3(w):
+    th = np.sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2])
+    K = skew3(w)
+    if th < 1e-6:
+        return np.eye(3) - 0.5 * K
+    return np.eye(3) - (1 - np.cos(th)) / th ** 2 * K + (th - np.sin(th)) / th ** 3 * (K @ K)
+
+
+@njit(cache=True)
+def orthonormalize3(R):
+    U, _, Vt = np.linalg.svd(R)
+    return U @ Vt
+
+
+@njit(cache=True)
+def residual_nb(dR, dv, dp, T, G_W, Ri, pi, vi, Rj, pj, vj):
+    dv_w = vj - vi - G_W * T
+    dp_w = pj - pi - vi * T - 0.5 * G_W * T ** 2
+    RiT = np.ascontiguousarray(Ri.T)
+    rR = so3_log3(np.ascontiguousarray(dR.T) @ RiT @ Rj)
+    a = RiT @ dv_w
+    b = RiT @ dp_w
+    rv = a - dv
+    rp = b - dp
+    Jr_inv = np.eye(3) + 0.5 * skew3(rR)
+    Ji = np.zeros((9, 9))
+    Jj = np.zeros((9, 9))
+    Ji[0:3, 0:3] = -Jr_inv @ np.ascontiguousarray(Rj.T) @ Ri
+    Jj[0:3, 0:3] = Jr_inv
+    Ji[3:6, 0:3] = skew3(a)
+    Ji[3:6, 6:9] = -RiT
+    Jj[3:6, 6:9] = RiT
+    Ji[6:9, 0:3] = skew3(b)
+    Ji[6:9, 3:6] = -RiT
+    Ji[6:9, 6:9] = -RiT * T
+    Jj[6:9, 3:6] = RiT
+    r = np.empty(9)
+    r[0:3] = rR; r[3:6] = rv; r[6:9] = rp
+    return r, Ji, Jj
+
+
+@njit(cache=True)
+def add_nb(dR, dv, dp, cov, dt, w, f, sg2, sa2):
+    """Un pas de préintégration : retourne (cov, dp, dv, dR) mis à jour (mêmes formules que Preintegration.add)."""
+    dRk = so3_exp3(w * dt)
+    sf = skew3(f)
+    A = np.eye(9)
+    A[0:3, 0:3] = dRk.T
+    A[3:6, 0:3] = -dR @ sf * dt
+    A[6:9, 0:3] = -0.5 * dR @ sf * dt ** 2
+    A[6:9, 3:6] = np.eye(3) * dt
+    Bg = np.zeros((9, 3)); Bg[0:3] = right_jacobian3(w * dt) * dt
+    Ba = np.zeros((9, 3)); Ba[3:6] = dR * dt; Ba[6:9] = 0.5 * dR * dt ** 2
+    cov2 = A @ cov @ A.T + Bg @ Bg.T * (sg2 / dt) + Ba @ Ba.T * (sa2 / dt)
+    dp2 = dp + dv * dt + 0.5 * dR @ f * dt ** 2
+    dv2 = dv + dR @ f * dt
+    dR2 = orthonormalize3(np.ascontiguousarray(dR @ dRk))
+    return cov2, dp2, dv2, dR2
 
 
 # ---------------------------------------------------------------------------
@@ -26,6 +130,8 @@ G_W = np.array([0.0, -G, 0.0])
 def skew(v):
     """(..., 3) -> (..., 3, 3) matrice du produit vectoriel."""
     v = np.asarray(v, float)
+    if v.ndim == 1:
+        return skew3(np.ascontiguousarray(v))
     S = np.zeros(v.shape[:-1] + (3, 3))
     S[..., 0, 1], S[..., 0, 2] = -v[..., 2], v[..., 1]
     S[..., 1, 0], S[..., 1, 2] = v[..., 2], -v[..., 0]
@@ -36,6 +142,8 @@ def skew(v):
 def so3_exp(w):
     """Rodrigues, (..., 3) -> (..., 3, 3)."""
     w = np.asarray(w, float)
+    if w.ndim == 1:
+        return so3_exp3(np.ascontiguousarray(w))
     th = np.linalg.norm(w, axis=-1)[..., None, None]
     K = skew(w)
     small = th < 1e-8
@@ -48,6 +156,8 @@ def so3_exp(w):
 def so3_log(R):
     """(..., 3, 3) -> (..., 3)."""
     R = np.asarray(R, float)
+    if R.ndim == 2:
+        return so3_log3(np.ascontiguousarray(R))
     c = np.clip((np.trace(R, axis1=-2, axis2=-1) - 1) / 2, -1.0, 1.0)
     th = np.arccos(c)
     v = np.stack([R[..., 2, 1] - R[..., 1, 2], R[..., 0, 2] - R[..., 2, 0], R[..., 1, 0] - R[..., 0, 1]], -1)
@@ -58,6 +168,8 @@ def so3_log(R):
 
 def right_jacobian(w):
     """Jacobienne à droite de SO(3), (3,) -> (3, 3)."""
+    w = np.asarray(w, float)
+    return right_jacobian3(np.ascontiguousarray(w))
     th = np.linalg.norm(w)
     K = skew(w)
     if th < 1e-6:
@@ -66,6 +178,9 @@ def right_jacobian(w):
 
 
 def orthonormalize(R):
+    R = np.asarray(R, float)
+    if R.ndim == 2:
+        return orthonormalize3(np.ascontiguousarray(R))
     U, _, Vt = np.linalg.svd(R)
     return U @ Vt
 
@@ -135,19 +250,9 @@ class Preintegration:
 
     def add(self, dt, w, f):
         self.samples.append((dt, w, f))
-        dR, dv = self.dR, self.dv
-        dRk = so3_exp(w * dt)
-        A = np.eye(9)
-        A[0:3, 0:3] = dRk.T
-        A[3:6, 0:3] = -dR @ skew(f) * dt
-        A[6:9, 0:3] = -0.5 * dR @ skew(f) * dt ** 2
-        A[6:9, 3:6] = np.eye(3) * dt
-        Bg = np.zeros((9, 3)); Bg[0:3] = right_jacobian(w * dt) * dt
-        Ba = np.zeros((9, 3)); Ba[3:6] = dR * dt; Ba[6:9] = 0.5 * dR * dt ** 2
-        self.cov = A @ self.cov @ A.T + Bg @ Bg.T * (self.sg2 / dt) + Ba @ Ba.T * (self.sa2 / dt)
-        self.dp = self.dp + dv * dt + 0.5 * dR @ f * dt ** 2
-        self.dv = dv + dR @ f * dt
-        self.dR = orthonormalize(dR @ dRk)
+        self.cov, self.dp, self.dv, self.dR = add_nb(
+            self.dR, self.dv, self.dp, self.cov, float(dt), np.ascontiguousarray(w, dtype=float),
+            np.ascontiguousarray(f, dtype=float), self.sg2, self.sa2)
         self.dt += dt
 
     def extend(self, other):
@@ -166,6 +271,9 @@ class Preintegration:
         """Résidu 9 (rotation, vitesse, position) et jacobiennes 9x9 par rapport à
         (θi, pi, vi) et (θj, pj, vj) ; perturbations R <- R Exp(δθ), p <- p + δp, v <- v + δv."""
         T = self.dt
+        c = np.ascontiguousarray
+        return residual_nb(c(self.dR), c(self.dv), c(self.dp), T, G_W, c(Ri, dtype=float), c(pi, dtype=float), c(vi, dtype=float),
+                               c(Rj, dtype=float), c(pj, dtype=float), c(vj, dtype=float))
         dv_w = vj - vi - G_W * T
         dp_w = pj - pi - vi * T - 0.5 * G_W * T ** 2
         rR = so3_log(self.dR.T @ Ri.T @ Rj)
