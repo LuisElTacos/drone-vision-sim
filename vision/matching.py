@@ -3,18 +3,50 @@ import cv2
 from numba import njit, prange
 
 
-def to_gray(img):
-    """Image RGB uint8 (H, W, 3) -> niveaux de gris float32 dans [0, 1]."""
+def to_gray(img, version="numba"):
+    """Image RGB uint8 (H, W, 3) -> niveaux de gris float32 dans [0, 1].
+    version="numba" : même calcul pixel par pixel en parallèle (résultat identique) ; "numpy" : version d'origine."""
+    if version == "numba" and img.ndim == 3 and img.dtype == np.uint8 and img.shape[2] >= 3:
+        return _gray_nb(img)
     if img.ndim == 2:
         return img.astype(np.float32) / (255.0 if img.dtype == np.uint8 else 1.0)
     rgb = img[..., :3].astype(np.float32) / 255.0
     return rgb @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
 
-def _window_norms(img, half):
-    """Norme de (fenêtre - moyenne) centrée en chaque pixel, par images intégrales (0 sur les bords)."""
+@njit(cache=True, parallel=True)
+def _gray_nb(img):
+    """to_gray en numba : (r/255)*0.299 + (g/255)*0.587 + (b/255)*0.114 en float32, comme la version numpy."""
+    H, W = img.shape[0], img.shape[1]
+    out = np.empty((H, W), np.float32)
+    w0, w1, w2 = np.float32(0.299), np.float32(0.587), np.float32(0.114)
+    c = np.float32(255.0)
+    for y in prange(H):
+        for x in range(W):
+            out[y, x] = (np.float32(img[y, x, 0]) / c) * w0 + (np.float32(img[y, x, 1]) / c) * w1 + (np.float32(img[y, x, 2]) / c) * w2
+    return out
+
+
+def _window_norms(img, half, parallel=True):
+    """Norme de (fenêtre - moyenne) centrée en chaque pixel, par images intégrales (0 sur les bords).
+    parallel=True : noyau numba parallèle sur les lignes (résultat identique) ; False : version d'origine."""
     S, SQ = cv2.integral2(np.ascontiguousarray(img, dtype=np.float32), sdepth=cv2.CV_64F, sqdepth=cv2.CV_64F) ## permet d'accéder à la somme des I(j, i et la somme des carrés)
-    return _norms_kernel(S, SQ, img.shape[0], img.shape[1], 2 * half + 1)
+    k = _norms_kernel_par if parallel else _norms_kernel
+    return k(S, SQ, img.shape[0], img.shape[1], 2 * half + 1)
+
+
+@njit(cache=True, parallel=True)
+def _norms_kernel_par(S, SQ, H, W, w):
+    """_norms_kernel avec les lignes en parallèle."""
+    n = w * w
+    h = w // 2
+    out = np.zeros((H, W))
+    for y in prange(h, H - h):
+        for x in range(h, W - h):
+            s1 = S[y + h + 1, x + h + 1] - S[y - h, x + h + 1] - S[y + h + 1, x - h] + S[y - h, x - h]
+            s2 = SQ[y + h + 1, x + h + 1] - SQ[y - h, x + h + 1] - SQ[y + h + 1, x - h] + SQ[y - h, x - h]
+            out[y, x] = np.sqrt(max(s2 - s1 * s1 / n, 0.0))
+    return out
 
 
 @njit(cache=True)

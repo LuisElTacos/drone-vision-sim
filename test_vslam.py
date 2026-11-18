@@ -184,7 +184,7 @@ def main():
     ap.add_argument("--vio-iters", type=int, default=5, help="itérations de Levenberg-Marquardt par image")
     ap.add_argument("--schur", choices=("dense", "creux"), default="creux",
                     help="complément de Schur du back-end VIO : dense (version d'origine) ou creux (numba, par couple image-point)")
-    ap.add_argument("--normes", choices=("recalcul", "partage"), default="recalcul",
+    ap.add_argument("--normes", choices=("recalcul", "partage"), default="partage",
                     help="normes de fenêtres ZNCC : recalculées par l'appariement, ou reprises de la stéréo du front-end VIO")
     ap.add_argument("--no-ransac", action="store_true", help="pas de RANSAC (matrice fondamentale) dans le suivi")
     ap.add_argument("--bruit-imu", type=float, default=0.05,
