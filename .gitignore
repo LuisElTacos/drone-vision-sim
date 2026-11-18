@@ -16,3 +16,8 @@ Assets/*
 Assets/models/*
 !Assets/models/DJI_Avata2_Sketchfab.glb
 !Assets/models/pine/
+# Ville (city_env.py) : modèle GLB et cache des collisions, pas les textures séparées (déjà dans le GLB)
+!Assets/ville/
+Assets/ville/*
+!Assets/ville/source/
+!Assets/ville/ville_collision.npz
