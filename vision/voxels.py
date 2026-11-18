@@ -59,7 +59,7 @@ def _integrate(L, seen_free, seen_occ, stamp, pts, c, t, origin, vs, val_free, v
 class VoxelMap:
     def __init__(self, origin, size_m, voxel_size):
         self.shape = np.ceil(np.asarray(size_m) / voxel_size).astype(int)
-        self.map = np.zeros(self.shape,dtype=np.float32)
+        self.map = np.zeros(self.shape,dtype=np.float32) ## grille de voxels de taille voxel_size
         self.origin=origin
         self.voxel_size=voxel_size
         self._seen_free = np.zeros(self.shape, np.int32)
@@ -81,9 +81,11 @@ class VoxelMap:
         np.clip(self.map, -2.0, 3.5, out=self.map)
           
     def world_to_idx(self,p):
+        """ Donne les indices du voxel contenant p"""
         return np.floor((p - self.origin) / self.voxel_size).astype(int) 
     
     def idx_to_world(self,idx):
+        """ Donne les coordonées dans le monde du voxel """
         return idx*self.voxel_size+self.origin+self.voxel_size/2 #centre du voxel
          
         
