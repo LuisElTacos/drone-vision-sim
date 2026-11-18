@@ -182,7 +182,7 @@ def main():
     ap.add_argument("--dist-min", type=int, default=15, help="distance min entre points suivis (px)")
     ap.add_argument("--kf-parallaxe", type=float, default=50.0, help="parallaxe moyenne (px) déclenchant une image clé")
     ap.add_argument("--vio-iters", type=int, default=5, help="itérations de Levenberg-Marquardt par image")
-    ap.add_argument("--schur", choices=("dense", "creux"), default="dense",
+    ap.add_argument("--schur", choices=("dense", "creux"), default="creux",
                     help="complément de Schur du back-end VIO : dense (version d'origine) ou creux (numba, par couple image-point)")
     ap.add_argument("--normes", choices=("recalcul", "partage"), default="recalcul",
                     help="normes de fenêtres ZNCC : recalculées par l'appariement, ou reprises de la stéréo du front-end VIO")

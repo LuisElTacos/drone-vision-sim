@@ -161,14 +161,18 @@ def _match_corners(left, right, norm_l, norm_r, xg_f_all, y_coords, d_min, d_max
 
 
 def match_stereo(left: np.ndarray, right: np.ndarray, corners_l: np.ndarray,d_min: int = 1, d_max: int = 120,
-    half: int = 5, ratio: float = 0.8, max_cost: float = 0.5, cross_check: bool = True):
+    half: int = 5, ratio: float = 0.8, max_cost: float = 0.5, cross_check: bool = True, norms=None):
+    """norms : (normes gauche, droite, half) déjà calculées sur les mêmes images (ex. FrontEnd.norms), sinon None."""
     if len(corners_l) == 0:
         return np.empty((0, 5), dtype=np.float32)
 
     left = np.ascontiguousarray(left, dtype=np.float32)
     right = np.ascontiguousarray(right, dtype=np.float32)
-    norm_l = _window_norms(left, half)      # normes des fenêtres, calculées une fois pour toute l'image
-    norm_r = _window_norms(right, half)
+    if norms is not None and norms[2] == half:
+        norm_l, norm_r = norms[0], norms[1]
+    else:
+        norm_l = _window_norms(left, half)      # normes des fenêtres, calculées une fois pour toute l'image
+        norm_r = _window_norms(right, half)
 
     y_coords = np.round(corners_l[:, 1]).astype(np.int64)
     xg_f_all = np.ascontiguousarray(corners_l[:, 0], dtype=np.float64)

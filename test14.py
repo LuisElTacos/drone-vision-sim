@@ -38,11 +38,11 @@ EDGE_REL = 0.05       # coin « sur un bord de profondeur » si la profondeur GT
 # 1. Capture
 # ---------------------------------------------------------------------------
 
-def match_along_rows(imgL, imgR, cL, min_zncc=0.8, ratio=0.8, grayL=None, grayR=None):
+def match_along_rows(imgL, imgR, cL, min_zncc=0.8, ratio=0.8, grayL=None, grayR=None, norms=None):
     """Adaptation de vision.matching.match_stereo (gris, [x_g,y,x_d,d,coût]) -> (ptsL, ptsR, scores)."""
     gL = grayL if grayL is not None else to_gray(imgL)
     gR = grayR if grayR is not None else to_gray(imgR)
-    m = match_stereo(gL, gR, cL, max_cost=2.0 * (1.0 - min_zncc), ratio=ratio).astype(np.float64)
+    m = match_stereo(gL, gR, cL, max_cost=2.0 * (1.0 - min_zncc), ratio=ratio, norms=norms).astype(np.float64)
     if len(m) == 0:
         return np.empty((0, 2)), np.empty((0, 2)), np.empty(0)
     return m[:, 0:2], np.column_stack([m[:, 2], m[:, 1]]), 1.0 - m[:, 4] / 2.0

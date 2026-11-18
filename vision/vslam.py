@@ -80,6 +80,122 @@ def _linearize_nb(Rs, F, Li, r, Pb, Pc, Z, valid, R_bc, f, sig, huber, nF, nL):
     return Hll, gl, Hpp6, gp6, Hpl6
 
 
+# ---- variante creuse du complément de Schur (schur="creux") -----------------------------------------------
+# Hpl n'est non nul que pour les couples (image, point) réellement observés : au lieu de la matrice dense
+# (9(nF-1), nL, 3), on garde un bloc 6x3 par couple, et on somme Hpl_l Hll_l^-1 Hpl_l^T point par point.
+def _paires(F, Li, nF, nL):
+    """Couples (image fi = F-1, point l) observés avec F > 0, triés par point. Retourne pf (npair,), pl (npair,),
+    lptr (nL+1,) (couples du point l : pf[lptr[l]:lptr[l+1]]) et pidx (nobs,) (couple de chaque observation, -1 si F = 0)."""
+    m = F > 0
+    key = Li.astype(np.int64) * nF + F.astype(np.int64)
+    uk, inv = np.unique(key[m], return_inverse=True)
+    pl, pf = uk // nF, uk % nF - 1
+    pidx = np.full(len(F), -1, np.int64)
+    pidx[m] = inv
+    lptr = np.zeros(nL + 1, np.int64)
+    np.add.at(lptr, pl + 1, 1)
+    return pf.astype(np.int64), pl.astype(np.int64), np.cumsum(lptr), pidx
+
+
+@njit(cache=True)
+def _linearize_sp_nb(Rs, F, Li, pidx, npair, r, Pb, Pc, Z, valid, R_bc, f, sig, huber, nF, nL):
+    """Même calcul que _linearize_nb, mais Hpl rangé par couple (image, point) : Hplp (npair,6,3).
+    Petits produits écrits en boucles scalaires (le @ de numba appelle BLAS, coûteux sur des 2x3)."""
+    Hll = np.zeros((nL, 3, 3))
+    gl = np.zeros((nL, 3))
+    Hpp6 = np.zeros((nF - 1, 6, 6))
+    gp6 = np.zeros((nF - 1, 6))
+    Hplp = np.zeros((npair, 6, 3))
+    Jp = np.zeros((2, 3))
+    JR = np.empty((2, 3))
+    A = np.empty((2, 3))
+    Jx = np.empty((2, 6))
+    for k in range(len(F)):
+        e = np.sqrt(r[k, 0] ** 2 + r[k, 1] ** 2)
+        w = 1.0 if e < huber else huber / max(e, 1e-9)
+        if not valid[k]:
+            w = 0.0
+        fz = f / Z[k] / sig
+        Jp[0, 0] = fz
+        Jp[0, 2] = -fz * Pc[k, 0] / Z[k]
+        Jp[1, 1] = fz
+        Jp[1, 2] = -fz * Pc[k, 1] / Z[k]
+        Rf = Rs[F[k]]
+        for a in range(2):
+            for b in range(3):                      # JR = Jp R_bc^T
+                JR[a, b] = Jp[a, 0] * R_bc[b, 0] + Jp[a, 1] * R_bc[b, 1] + Jp[a, 2] * R_bc[b, 2]
+            for b in range(3):                      # A = JR R^T
+                A[a, b] = JR[a, 0] * Rf[b, 0] + JR[a, 1] * Rf[b, 1] + JR[a, 2] * Rf[b, 2]
+            # Jth = JR [Pb]x
+            x, y, z = Pb[k, 0], Pb[k, 1], Pb[k, 2]
+            Jx[a, 0] = JR[a, 1] * z - JR[a, 2] * y
+            Jx[a, 1] = -JR[a, 0] * z + JR[a, 2] * x
+            Jx[a, 2] = JR[a, 0] * y - JR[a, 1] * x
+            Jx[a, 3] = -A[a, 0]
+            Jx[a, 4] = -A[a, 1]
+            Jx[a, 5] = -A[a, 2]
+        wr0, wr1 = w * r[k, 0], w * r[k, 1]
+        l = Li[k]
+        for i in range(3):
+            gl[l, i] += A[0, i] * wr0 + A[1, i] * wr1
+            for j in range(3):
+                Hll[l, i, j] += w * (A[0, i] * A[0, j] + A[1, i] * A[1, j])
+        if F[k] > 0:
+            fi = F[k] - 1
+            p = pidx[k]
+            for i in range(6):
+                gp6[fi, i] += Jx[0, i] * wr0 + Jx[1, i] * wr1
+                for j in range(6):
+                    Hpp6[fi, i, j] += w * (Jx[0, i] * Jx[0, j] + Jx[1, i] * Jx[1, j])
+                for j in range(3):
+                    Hplp[p, i, j] += w * (Jx[0, i] * A[0, j] + Jx[1, i] * A[1, j])
+    return Hll, gl, Hpp6, gp6, Hplp
+
+
+@njit(cache=True)
+def _schur_sp_nb(Hll_inv, Hplp, gl, pf, lptr, npo):
+    """Somme sur les points de Hpl_l Hll_l^-1 Hpl_l^T (npo,npo) et de Hpl_l Hll_l^-1 gl_l (npo,)
+    (seules les lignes 9fi..9fi+6 d'une image fi sont non nulles)."""
+    SS = np.zeros((npo, npo))
+    bb = np.zeros(npo)
+    nL = len(lptr) - 1
+    B = np.empty((6, 3))
+    for l in range(nL):
+        a0, a1 = lptr[l], lptr[l + 1]
+        for a in range(a0, a1):
+            for i in range(6):                      # B = Hpl_a Hll^-1
+                for j in range(3):
+                    B[i, j] = Hplp[a, i, 0] * Hll_inv[l, 0, j] + Hplp[a, i, 1] * Hll_inv[l, 1, j] + Hplp[a, i, 2] * Hll_inv[l, 2, j]
+            sa = 9 * pf[a]
+            for i in range(6):
+                bb[sa + i] += B[i, 0] * gl[l, 0] + B[i, 1] * gl[l, 1] + B[i, 2] * gl[l, 2]
+            for b in range(a0, a1):
+                sb = 9 * pf[b]
+                for i in range(6):
+                    for j in range(6):
+                        SS[sa + i, sb + j] += B[i, 0] * Hplp[b, j, 0] + B[i, 1] * Hplp[b, j, 1] + B[i, 2] * Hplp[b, j, 2]
+    return SS, bb
+
+
+@njit(cache=True)
+def _backsub_sp_nb(Hll_inv, Hplp, gl, pf, lptr, dx):
+    """dl_l = Hll_l^-1 (-gl_l - Hpl_l^T dx)."""
+    nL = len(lptr) - 1
+    dl = np.empty((nL, 3))
+    t = np.empty(3)
+    for l in range(nL):
+        for j in range(3):
+            t[j] = -gl[l, j]
+        for a in range(lptr[l], lptr[l + 1]):
+            sa = 9 * pf[a]
+            for j in range(3):
+                for i in range(6):
+                    t[j] -= Hplp[a, i, j] * dx[sa + i]
+        for i in range(3):
+            dl[l, i] = Hll_inv[l, i, 0] * t[0] + Hll_inv[l, i, 1] * t[1] + Hll_inv[l, i, 2] * t[2]
+    return dl
+
+
 
 # ---- A. Matrice fondamentale + RANSAC ---------------------------------------
 def normalize(p):
@@ -124,7 +240,43 @@ def sampson(F, p0, p1):
     return num / np.maximum(den, 1e-12)
 
 
-def fundamental_ransac(p0, p1, threshold=1.0, iters=200, rng=None):
+@njit(cache=True)
+def _sampson_best_nb(F, p0, p1, thr2):
+    """Pour chaque hypothèse F[k], inliers = distance de Sampson^2 < thr2 ; retourne le masque de la première
+    hypothèse au plus grand consensus (comme inl[inl.sum(1).argmax()])."""
+    K, n = F.shape[0], p0.shape[0]
+    best, kbest = -1, 0
+    for k in range(K):
+        f = F[k]
+        c = 0
+        for m in range(n):
+            x0, y0, x1, y1 = p0[m, 0], p0[m, 1], p1[m, 0], p1[m, 1]
+            a0 = f[0, 0] * x0 + f[0, 1] * y0 + f[0, 2]
+            a1 = f[1, 0] * x0 + f[1, 1] * y0 + f[1, 2]
+            a2 = f[2, 0] * x0 + f[2, 1] * y0 + f[2, 2]
+            b0 = f[0, 0] * x1 + f[1, 0] * y1 + f[2, 0]
+            b1 = f[0, 1] * x1 + f[1, 1] * y1 + f[2, 1]
+            num = (x1 * a0 + y1 * a1 + a2) ** 2
+            den = max(a0 * a0 + a1 * a1 + b0 * b0 + b1 * b1, 1e-12)
+            if num / den < thr2:
+                c += 1
+        if c > best:
+            best, kbest = c, k
+    f = F[kbest]
+    out = np.empty(n, np.bool_)
+    for m in range(n):
+        x0, y0, x1, y1 = p0[m, 0], p0[m, 1], p1[m, 0], p1[m, 1]
+        a0 = f[0, 0] * x0 + f[0, 1] * y0 + f[0, 2]
+        a1 = f[1, 0] * x0 + f[1, 1] * y0 + f[1, 2]
+        a2 = f[2, 0] * x0 + f[2, 1] * y0 + f[2, 2]
+        b0 = f[0, 0] * x1 + f[1, 0] * y1 + f[2, 0]
+        b1 = f[0, 1] * x1 + f[1, 1] * y1 + f[2, 1]
+        out[m] = (x1 * a0 + y1 * a1 + a2) ** 2 / max(a0 * a0 + a1 * a1 + b0 * b0 + b1 * b1, 1e-12) < thr2
+    return out
+
+
+def fundamental_ransac(p0, p1, threshold=1.0, iters=200, rng=None, version="numba"):
+    """version : "einsum" (version d'origine) ou "numba" (même test de Sampson, sans tableaux (iters, n, 3))."""
     n = len(p0)
     if n < 12:
         return np.ones(n, bool)
@@ -143,6 +295,9 @@ def fundamental_ransac(p0, p1, threshold=1.0, iters=200, rng=None):
     S[:, 2] = 0
     F = U @ (S[:, :, None] * Vt2)  # = U diag(S) Vt2 par hypothèse
     F = T1.T[None] @ F @ T0[None]  # dénormalisation, (iters,3,3)
+    if version == "numba":
+        return _sampson_best_nb(np.ascontiguousarray(F), np.ascontiguousarray(p0, dtype=float),
+                                np.ascontiguousarray(p1, dtype=float), float(threshold) ** 2)
     x0 = np.column_stack([p0, np.ones(n)])
     x1 = np.column_stack([p1, np.ones(n)])
     Fx0 = np.einsum("kij,nj->kni", F, x0)  # (iters,n,3) = F_k @ x0_n
@@ -176,6 +331,7 @@ class FrontEnd:
         self.pts = np.empty((0, 2))
         self.ids = np.empty(0, np.int64)
         self.next_id = 0
+        self.norms = None
 
     def predict(self, R_cc):
         """B1. Prédiction des points dans l'image t par l'homographie de rotation H = K R_cc K^-1
@@ -237,16 +393,18 @@ class FrontEnd:
         (_match_corners, ZNCC, ratio, contrôle gauche-droite). uvR = (u - d, v) ou nan si pas d'appariement.
         """
         uvR = np.full_like(self.pts, np.nan)
+        self.norms = None  # (normes gauche, droite, half), réutilisables par l'appariement de la même paire d'images
         if len(self.pts):
             L = np.ascontiguousarray(grayL, np.float32)
             R = np.ascontiguousarray(grayR, np.float32)
             half = 5
             yc = np.round(self.pts[:, 1]).astype(np.int64)
+            self.norms = (_window_norms(L, half), _window_norms(R, half), half)
             out, keep = _match_corners(
                 L,
                 R,
-                _window_norms(L, half),
-                _window_norms(R, half),
+                self.norms[0],
+                self.norms[1],
                 np.ascontiguousarray(self.pts[:, 0], np.float64),
                 yc,
                 1,
@@ -305,7 +463,13 @@ class VIO:
         sigma_g=2e-3,
         sigma_a=2e-2,
         front=None,
+        schur="creux",
+        obs="numpy",
     ):
+        # schur : "dense" (version d'origine, Hpl dense (9(nF-1), nL, 3)) ou "creux" (un bloc 6x3 par couple
+        # (image, point) observé, complément de Schur en numba ; mêmes équations, arrondis flottants près)
+        self.schur = schur
+        self.obs = obs  # "python" (version d'origine de _observations) ou "numpy" (vectorisée, mêmes sorties)
         self.K, self.R_bc = K, R_bc
         self.p_bc = np.stack([p_bcL, p_bcR])
         self.f, self.cx, self.cy = K[0, 0], K[0, 2], K[1, 2]
@@ -423,6 +587,36 @@ class VIO:
             np.array(UV, float).reshape(-1, 2),
         )
 
+    def _observations_np(self):
+        """Même résultat que _observations (même ordre), en numpy : act dans l'ordre de première apparition,
+        observations dans l'ordre (image, point), gauche puis droite si appariée."""
+        nf = len(self.frames)
+        ids = np.concatenate([f.ids for f in self.frames]) if nf else np.empty(0, np.int64)
+        if len(ids) == 0 or not self.lm:
+            return [], np.empty(0, int), np.empty(0, int), np.empty(0, int), np.empty((0, 2))
+        fidx = np.repeat(np.arange(nf), [len(f.ids) for f in self.frames])
+        uvL = np.concatenate([f.uvL for f in self.frames]).reshape(-1, 2)
+        uvR = np.concatenate([f.uvR for f in self.frames]).reshape(-1, 2)
+        in_lm = np.isin(ids, np.fromiter(self.lm.keys(), np.int64, len(self.lm)))
+        u, first, cnt = np.unique(ids[in_lm], return_index=True, return_counts=True)
+        sel = cnt >= 2
+        act_arr = u[sel][np.argsort(first[sel], kind="stable")]       # ordre de première apparition
+        if len(act_arr) == 0:
+            return [], np.empty(0, int), np.empty(0, int), np.empty(0, int), np.empty((0, 2))
+        ordre = np.argsort(act_arr, kind="stable")
+        u_act = act_arr[ordre]                                          # trié, pour searchsorted
+        pos = np.minimum(np.searchsorted(u_act, ids), len(u_act) - 1)
+        rows = np.nonzero(u_act[pos] == ids)[0]
+        k = np.empty(len(ids), np.int64)
+        k[rows] = ordre[pos[rows]]                                      # indice dans act
+        st = np.isfinite(uvR[rows, 0])
+        n_rep = 1 + st.astype(np.int64)
+        r2 = np.repeat(rows, n_rep)
+        C = np.zeros(len(r2), int)
+        C[np.cumsum(n_rep)[st] - 1] = 1
+        UV = np.where(C[:, None] == 1, uvR[r2], uvL[r2])
+        return act_arr.tolist(), fidx[r2].astype(int), k[r2].astype(int), C, UV.astype(float)
+
     def _cost(self, Rs, ps, vs, P, obs):
         """ETAPE 5b. Somme des Huber(||r||) sur les observations valides + somme des 0.5 * ||W r_imu||^2 sur
         les paires d'images consécutives (pre.residual(...), pre.sqrt_info())."""
@@ -444,7 +638,7 @@ class VIO:
 
     def _optimize(self):
         nF = len(self.frames)
-        act, F, Li, C, UV = self._observations()
+        act, F, Li, C, UV = self._observations_np() if self.obs == "numpy" else self._observations()
         if nF < 2:
             return 0.0, 0.0, len(F)
         obs = (F, Li, C, UV)
@@ -456,24 +650,32 @@ class VIO:
         Ws = [None] + [self.frames[i].preint.sqrt_info() for i in range(1, nF)]
         cost = cost0 = self._cost(Rs, ps, vs, P, obs)
         lam = 1e-4
+        creux = self.schur == "creux"
+        if creux:
+            pf, pl, lptr, pidx = _paires(F, Li, nF, nL)
+            Hplp = np.zeros((0, 6, 3))
         for _ in range(self.iters):
             # --- linéarisation ---
             Hpp = np.zeros((npo, npo))
             gp = np.zeros(npo)
             Hll = np.zeros((nL, 3, 3))
             gl = np.zeros((nL, 3))
-            Hpl = np.zeros((npo, nL, 3))
+            if not creux:
+                Hpl = np.zeros((npo, nL, 3))
             if len(F):
                 r, Pb, Pc, Z, valid = self._reproj(Rs, ps, P, F, Li, C, UV)
-                Hll, gl, Hpp6, gp6, Hpl6 = _linearize_nb(
-                    np.ascontiguousarray(Rs, dtype=float), np.ascontiguousarray(F, dtype=np.int64), np.ascontiguousarray(Li, dtype=np.int64),
-                    r, Pb, Pc, Z, valid, np.ascontiguousarray(self.R_bc, dtype=float), float(self.f), float(self.sig), float(self.huber),
-                    nF, nL)
+                args_nb = (np.ascontiguousarray(Rs, dtype=float), np.ascontiguousarray(F, dtype=np.int64), np.ascontiguousarray(Li, dtype=np.int64))
+                args_nb2 = (r, Pb, Pc, Z, valid, np.ascontiguousarray(self.R_bc, dtype=float), float(self.f), float(self.sig), float(self.huber), nF, nL)
+                if creux:
+                    Hll, gl, Hpp6, gp6, Hplp = _linearize_sp_nb(*args_nb, pidx, len(pf), *args_nb2)
+                else:
+                    Hll, gl, Hpp6, gp6, Hpl6 = _linearize_nb(*args_nb, *args_nb2)
                 for k in range(nF - 1):
                     sk = 9 * k
                     Hpp[sk : sk + 6, sk : sk + 6] += Hpp6[k]
                     gp[sk : sk + 6] += gp6[k]
-                    Hpl[sk : sk + 6] += Hpl6[k]
+                    if not creux:
+                        Hpl[sk : sk + 6] += Hpl6[k]
             # IMU
             for i in range(1, nF):
                 ri, Ji, Jj = self.frames[i].preint.residual(
@@ -490,7 +692,8 @@ class VIO:
                     Hpp[si : si + 9, sj : sj + 9] += Ji.T @ Jj
                     Hpp[sj : sj + 9, si : si + 9] += Jj.T @ Ji
                     gp[si : si + 9] += Ji.T @ ri
-            Hpl2 = Hpl.reshape(npo, 3 * nL)
+            if not creux:
+                Hpl2 = Hpl.reshape(npo, 3 * nL)
             # --- LM avec complément de Schur ---
             improved = False
             for _ in range(6):
@@ -499,17 +702,25 @@ class VIO:
                 )
                 Hll_inv = np.linalg.inv(Hll_d)
                 Hpp_d = Hpp + lam * np.diag(np.diag(Hpp)) + 1e-9 * np.eye(npo)
-                HplHi = np.einsum("pli,lij->plj", Hpl, Hll_inv).reshape(npo, 3 * nL)
-                S = Hpp_d - HplHi @ Hpl2.T
-                bp = -gp + HplHi @ gl.ravel()
+                if creux:
+                    SS, bb = _schur_sp_nb(Hll_inv, Hplp, gl, pf, lptr, npo)
+                    S = Hpp_d - SS
+                    bp = -gp + bb
+                else:
+                    HplHi = np.einsum("pli,lij->plj", Hpl, Hll_inv).reshape(npo, 3 * nL)
+                    S = Hpp_d - HplHi @ Hpl2.T
+                    bp = -gp + HplHi @ gl.ravel()
                 try:
                     dx = np.linalg.solve(S, bp)
                 except np.linalg.LinAlgError:
                     lam *= 10
                     continue
-                dl = np.einsum(
-                    "lij,lj->li", Hll_inv, -gl - (Hpl2.T @ dx).reshape(nL, 3)
-                )
+                if creux:
+                    dl = _backsub_sp_nb(Hll_inv, Hplp, gl, pf, lptr, dx)
+                else:
+                    dl = np.einsum(
+                        "lij,lj->li", Hll_inv, -gl - (Hpl2.T @ dx).reshape(nL, 3)
+                    )
                 d = dx.reshape(nF - 1, 9)
                 Rn = Rs.copy()
                 pn = ps.copy()
