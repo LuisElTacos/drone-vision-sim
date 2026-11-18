@@ -368,8 +368,8 @@ def main():
                              f"{1000 * st.get('t_front', 0):.1f}", f"{1000 * st.get('t_back', 0):.1f}"])
             d_goal = float(np.linalg.norm(goal_w - pos_e))
             rows.append([it, f"{t_sim:.3f}", n_coins, len(ptsL), *[f"{1000 * x:.2f}" for x in t],
-                         f"{1000 * t.sum():.2f}", f"{d_goal:.2f}"])
-            print(f"  it {it:3d}  t {t_sim:5.1f} s  pts {len(ptsL):5d}  total {1000 * t.sum():4.0f} ms "
+                         f"{1000 * t[1:].sum():.2f}", f"{d_goal:.2f}"])   # total sans la capture
+            print(f"  it {it:3d}  t {t_sim:5.1f} s  pts {len(ptsL):5d}  total {1000 * t[1:].sum():4.0f} ms "
                   f"(VIO {1000 * t[2]:3.0f})  v {np.linalg.norm(drone.velocity):4.2f} m/s  cible {d_goal:5.1f} m  "
                   f"VIO : klt {st.get('klt', 0):3d}/{st.get('prev', 0):3d} suivis {st.get('suivis', 0):3d} 3D {st.get('points3d', 0):3d}{' clé' if st.get('cle') else '    '} "
                   f"err {100 * err_p:5.1f} cm {err_yaw:+5.2f}°  contacts {n_contacts}"
@@ -465,7 +465,7 @@ def main():
     # --- bilan vol ------------------------------------------------------------
     times, traj, traj_est = np.array(times), np.array(traj), np.array(traj_est)
     T = times[1:] if len(times) > 1 else times
-    tot = T.sum(axis=1)
+    tot = T[:, 1:].sum(axis=1)                 # vision sans la capture (rendu simulé, absent sur un vrai drone)
     dist_parc = float(np.sum(np.linalg.norm(np.diff(traj, axis=0), axis=1)))
     print(f"\n  Bilan : {status} à t = {t_sim:.1f} s simulées ({len(times)} images traitées)")
     print(f"  distance parcourue {dist_parc:.1f} m, distance finale (vraie) à la cible {np.linalg.norm(goal_w - traj[-1]):.1f} m")
@@ -496,7 +496,7 @@ def main():
     # --- récap des temps --------------------------------------------------------
     Ex = extra[1:1 + len(T)]
     Ex = {k: np.array([e[k] for e in Ex]) for k in ("follow", "phys", "video")} if len(Ex) == len(T) else {}
-    cols = [(n, c) for n, c in zip(STEPS, T.T)] + [("TOTAL vision", T.sum(axis=1))]
+    cols = [(n, c) for n, c in zip(STEPS, T.T)] + [("TOTAL vision (hors capture)", T[:, 1:].sum(axis=1))]
     lab = {"follow": "follow (cmd), tous les pas", "phys": "physique MuJoCo + IMU, tous les pas", "video": "vidéo (rendu + mp4)"}
     cols += [(lab[k], v) for k, v in Ex.items()]
     tot_all = T.sum(axis=1) + sum(Ex.values()) if Ex else T.sum(axis=1)

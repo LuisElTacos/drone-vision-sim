@@ -94,7 +94,11 @@ def cout_arc(n, m, cost_extra, voxel_size):
 def heuristic(n, voxel_size, goal_idx):
     return voxel_size * math.dist(n, goal_idx)
 
-def astar(blocked, cost_extra, start_idx, goal_idx, voxel_size, w=2.0):
+def astar(blocked, cost_extra, start_idx, goal_idx, voxel_size, w=2.0, version="numba"):
+    """version="numba" : même algorithme (même ordre du tas (f, h, indice), mêmes arrondis), compilé ;
+    version="python" : version d'origine."""
+    if version == "numba":
+        return _astar_numba(blocked, cost_extra, start_idx, goal_idx, voxel_size, w)
     shape = blocked.shape
     open_heap = []
     hs=heuristic(start_idx, voxel_size, goal_idx)
@@ -124,3 +128,122 @@ def astar(blocked, cost_extra, start_idx, goal_idx, voxel_size, w=2.0):
                 hm = heuristic(m, voxel_size, goal_idx)
                 h.heappush(open_heap, (g[m] + w*hm, hm, m))
     return None
+
+# ---- A* compilé (numba) : mêmes clés de tas (f, h, i, j, k) que la version Python, donc même ordre de sortie ----
+from numba import njit as _njit
+
+
+@_njit(cache=True, inline="always")
+def _key_lt(F, Hh, I, a, b):
+    """Clé a < clé b, ordre lexicographique (f, h, i, j, k) comme les tuples Python."""
+    if F[a] != F[b]:
+        return F[a] < F[b]
+    if Hh[a] != Hh[b]:
+        return Hh[a] < Hh[b]
+    for t in range(3):
+        if I[a, t] != I[b, t]:
+            return I[a, t] < I[b, t]
+    return False
+
+
+@_njit(cache=True)
+def _astar_nb(blocked, cost_extra, s0, s1, s2, g0, g1, g2, vs, w, c32):
+    nx, ny, nz = blocked.shape
+    cap = 1024
+    F = np.empty(cap); Hh = np.empty(cap); I = np.empty((cap, 3), np.int64)
+    size = 0
+    g = np.full((nx, ny, nz), np.inf)
+    closed = np.zeros((nx, ny, nz), np.bool_)
+    par = np.full((nx, ny, nz), -1, np.int64)
+    hs = vs * np.sqrt(float((s0 - g0) ** 2 + (s1 - g1) ** 2 + (s2 - g2) ** 2))
+    F[0] = w * hs; Hh[0] = hs; I[0, 0] = s0; I[0, 1] = s1; I[0, 2] = s2
+    size = 1
+    g[s0, s1, s2] = 0.0
+    found = False
+    while size > 0:
+        # pop (tas binaire min)
+        a, b, c = I[0, 0], I[0, 1], I[0, 2]
+        size -= 1
+        if size > 0:
+            F[0] = F[size]; Hh[0] = Hh[size]; I[0, 0] = I[size, 0]; I[0, 1] = I[size, 1]; I[0, 2] = I[size, 2]
+            p = 0
+            while True:
+                l, r, m = 2 * p + 1, 2 * p + 2, p
+                if l < size and _key_lt(F, Hh, I, l, m):
+                    m = l
+                if r < size and _key_lt(F, Hh, I, r, m):
+                    m = r
+                if m == p:
+                    break
+                F[p], F[m] = F[m], F[p]; Hh[p], Hh[m] = Hh[m], Hh[p]
+                for t in range(3):
+                    I[p, t], I[m, t] = I[m, t], I[p, t]
+                p = m
+        if closed[a, b, c]:
+            continue
+        if a == g0 and b == g1 and c == g2:
+            found = True
+            break
+        closed[a, b, c] = True
+        gn = g[a, b, c]
+        for di in range(-1, 2):
+            for dj in range(-1, 2):
+                for dk in range(-1, 2):
+                    if di == 0 and dj == 0 and dk == 0:
+                        continue
+                    x, y, z = a + di, b + dj, c + dk
+                    if x < 0 or x >= nx or y < 0 or y >= ny or z < 0 or z >= nz:
+                        continue
+                    if blocked[x, y, z] or closed[x, y, z]:
+                        continue
+                    longueur = vs * np.sqrt(float(di * di + dj * dj + dk * dk))
+                    if c32:   # float Python * float32 -> float32 (règles numpy 2), comme cout_arc
+                        cc = float(np.float32(longueur) * (np.float32(1.0) + np.float32(cost_extra[x, y, z])))
+                    else:
+                        cc = longueur * (1.0 + float(cost_extra[x, y, z]))
+                    if gn + cc < g[x, y, z]:
+                        g[x, y, z] = gn + cc
+                        par[x, y, z] = (a * ny + b) * nz + c
+                        hm = vs * np.sqrt(float((x - g0) ** 2 + (y - g1) ** 2 + (z - g2) ** 2))
+                        if size == cap:
+                            cap *= 2
+                            F2 = np.empty(cap); H2 = np.empty(cap); I2 = np.empty((cap, 3), np.int64)
+                            F2[:size] = F[:size]; H2[:size] = Hh[:size]; I2[:size] = I[:size]
+                            F, Hh, I = F2, H2, I2
+                        F[size] = g[x, y, z] + w * hm; Hh[size] = hm
+                        I[size, 0] = x; I[size, 1] = y; I[size, 2] = z
+                        q = size
+                        size += 1
+                        while q > 0:
+                            pq = (q - 1) // 2
+                            if _key_lt(F, Hh, I, q, pq):
+                                F[q], F[pq] = F[pq], F[q]; Hh[q], Hh[pq] = Hh[pq], Hh[q]
+                                for t in range(3):
+                                    I[q, t], I[pq, t] = I[pq, t], I[q, t]
+                                q = pq
+                            else:
+                                break
+    if not found:
+        return np.empty((0, 3), np.int64)
+    n = 1
+    v = (g0 * ny + g1) * nz + g2
+    while par.flat[v] >= 0:
+        v = par.flat[v]
+        n += 1
+    out = np.empty((n, 3), np.int64)
+    v = (g0 * ny + g1) * nz + g2
+    for t in range(n - 1, -1, -1):
+        out[t, 0] = v // (ny * nz); out[t, 1] = (v // nz) % ny; out[t, 2] = v % nz
+        if t > 0:
+            v = par.flat[v]
+    return out
+
+
+def _astar_numba(blocked, cost_extra, start_idx, goal_idx, voxel_size, w):
+    c32 = isinstance(voxel_size * 1.0 * (1 + cost_extra.flat[0]), np.float32)
+    s = [int(v) for v in start_idx]; t = [int(v) for v in goal_idx]
+    out = _astar_nb(np.ascontiguousarray(blocked), np.ascontiguousarray(cost_extra), s[0], s[1], s[2], t[0], t[1], t[2],
+                    float(voxel_size), float(w), c32)
+    if len(out) == 0:
+        return None
+    return [tuple(int(v) for v in r) for r in out]

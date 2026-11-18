@@ -164,8 +164,8 @@ def camera_panel(img, ptsL, Z, z_max):
     return out
 
 
-def put_lines(img, lines, org=(8, 20), scale=0.5, col2=None):
-    """Texte blanc cerclé de noir. Une ligne peut être (gauche, droite) : la droite est alignée à col2."""
+def put_lines(img, lines, org=(8, 20), scale=0.5, col2=None, contour=False):
+    """Texte blanc (cerclé de noir si contour=True). Une ligne peut être (gauche, droite) : la droite est alignée à col2."""
     font = cv2.FONT_HERSHEY_SIMPLEX
     for k, line in enumerate(lines):
         y = org[1] + int(22 * scale / 0.5) * k
@@ -174,7 +174,8 @@ def put_lines(img, lines, org=(8, 20), scale=0.5, col2=None):
             (w, _), _ = cv2.getTextSize(line[1], font, scale, 1)
             parts = [(line[0], org[0]), (line[1], org[0] + col2 - w)]
         for txt, x in parts:
-            cv2.putText(img, txt, (x, y), font, scale, (0, 0, 0), 3, cv2.LINE_AA)
+            if contour:
+                cv2.putText(img, txt, (x, y), font, scale, (0, 0, 0), 3, cv2.LINE_AA)
             cv2.putText(img, txt, (x, y), font, scale, (255, 255, 255), 1, cv2.LINE_AA)
 
 

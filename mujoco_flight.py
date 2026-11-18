@@ -11,6 +11,7 @@ Repère du corps MuJoCo : x avant, y gauche, z haut.
 """
 
 import math
+import operator
 
 import mujoco
 import numpy as np
@@ -107,11 +108,13 @@ class MujocoFlight:
     # --- scène -----------------------------------------------------------------
 
     def sync_scene(self, colliders):
-        """Reconstruit le modèle si la liste des collisionneurs a changé (état du drone conservé)."""
-        key = tuple(id(c) for c in colliders)
-        if key == self.scene_key:
+        """Reconstruit le modèle si la liste des collisionneurs a changé (état du drone conservé).
+        Comparaison par identité des objets (comme l'ancienne clé tuple(id(c))), mais faite en C avec
+        map(operator.is_) au lieu d'un tuple de ~30 000 id() Python à chaque pas."""
+        prev = self.scene_key
+        if prev is not None and len(prev) == len(colliders) and all(map(operator.is_, prev, colliders)):
             return
-        self.scene_key = key
+        self.scene_key = list(colliders)        # garde les objets (donc leurs id restent uniques)
         old = None if self.data is None else (self.data.qpos.copy(), self.data.qvel.copy())
         self.model = mujoco.MjModel.from_xml_string(drone_mjcf(self.half, colliders))
         self.data = mujoco.MjData(self.model)

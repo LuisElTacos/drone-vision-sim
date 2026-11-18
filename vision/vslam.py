@@ -23,13 +23,17 @@ def _reproj_nb(Rs, ps, P, F, Li, C, UV, p_bc, R_bc, f, cx, cy, sig):
     Zs = np.empty(n)
     valid = np.empty(n, np.bool_)
     for k in range(n):
-        Rf = Rs[F[k]]
-        d = P[Li[k]] - ps[F[k]]
+        fk, lk, ck = F[k], Li[k], C[k]
+        d0 = P[lk, 0] - ps[fk, 0]                 # mêmes opérations qu'avant, sans tableaux temporaires
+        d1 = P[lk, 1] - ps[fk, 1]
+        d2 = P[lk, 2] - ps[fk, 2]
         for i in range(3):
-            Pb[k, i] = Rf[0, i] * d[0] + Rf[1, i] * d[1] + Rf[2, i] * d[2]
-        q = Pb[k] - p_bc[C[k]]
+            Pb[k, i] = Rs[fk, 0, i] * d0 + Rs[fk, 1, i] * d1 + Rs[fk, 2, i] * d2
+        q0 = Pb[k, 0] - p_bc[ck, 0]
+        q1 = Pb[k, 1] - p_bc[ck, 1]
+        q2 = Pb[k, 2] - p_bc[ck, 2]
         for j in range(3):
-            Pc[k, j] = q[0] * R_bc[0, j] + q[1] * R_bc[1, j] + q[2] * R_bc[2, j]
+            Pc[k, j] = q0 * R_bc[0, j] + q1 * R_bc[1, j] + q2 * R_bc[2, j]
         Z = Pc[k, 2]
         valid[k] = Z > 0.05
         Zs[k] = Z if Z > 0.05 else 0.05
