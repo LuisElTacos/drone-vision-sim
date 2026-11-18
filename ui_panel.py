@@ -128,6 +128,8 @@ class SidePanel:
                 settings["building_mode"] = 1
             if imgui.radio_button("Forêt", mode == 3):
                 settings["building_mode"] = 3
+            if imgui.radio_button("Ville", mode == 4):
+                settings["building_mode"] = 4
             if imgui.radio_button("Bâtiment (vol intérieur)", mode == 0):
                 settings["building_mode"] = 0
             if imgui.radio_button("Vide", mode == 2):
@@ -162,6 +164,20 @@ class SidePanel:
                     settings["teleport"] = settings.get("forest_spawn")
                 imgui.spacing()
                 for line in settings.get("forest_info", []):
+                    imgui.text_colored(imgui.ImVec4(0.7, 0.7, 0.7, 1.0), line)
+                imgui.text_colored(imgui.ImVec4(0.3, 0.9, 0.4, 1.0), "Cible : sphère verte")
+
+            if mode == 4:
+                imgui.spacing()
+                imgui.separator()
+                imgui.text("Ville")
+                btn_w = PANEL_WIDTH - 25
+                if imgui.button("Nouveau départ / cible (graine aléatoire)", imgui.ImVec2(btn_w, 24)):
+                    settings["regen_city"] = True
+                if imgui.button("Retour au départ##ville", imgui.ImVec2(btn_w, 24)):
+                    settings["teleport"] = settings.get("city_spawn")
+                imgui.spacing()
+                for line in settings.get("city_info", []):
                     imgui.text_colored(imgui.ImVec4(0.7, 0.7, 0.7, 1.0), line)
                 imgui.text_colored(imgui.ImVec4(0.3, 0.9, 0.4, 1.0), "Cible : sphère verte")
 

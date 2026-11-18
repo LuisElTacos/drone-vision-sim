@@ -18,6 +18,49 @@ def _sample(img, X, Y):
     return cv2.remap(img, X.astype(np.float32), Y.astype(np.float32), cv2.INTER_LINEAR,
                      borderMode=cv2.BORDER_REPLICATE)
 
+class KLTCV:
+    """Même interface que KLT, avec cv2.calcOpticalFlowPyrLK (mêmes fenêtre, niveaux, itérations, eps ;
+    même contrôle aller-retour fb_max ; résidu = erreur L1 moyenne d'OpenCV / 255 < max_res)."""
+
+    def __init__(self, win=15, levels=3, iters=10, eps=0.03, min_eig=1e-4, max_res=0.15):
+        self.win, self.levels, self.iters, self.eps = win, levels, iters, eps
+        self.min_eig, self.max_res = min_eig, max_res
+        self.crit = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, iters, eps)
+
+    def pyramid(self, gray):
+        g = np.clip(np.asarray(gray, np.float32) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        return (g,)                  # OpenCV construit lui-même sa pyramide
+
+    def track(self, pyrI, pyrJ, p0, p_init=None):
+        n = len(p0)
+        if n == 0:
+            return np.empty((0, 2)), np.zeros(0, bool)
+        p0 = np.asarray(p0, np.float64)
+        flags = 0
+        init = None
+        if p_init is not None:
+            init = np.ascontiguousarray(np.asarray(p_init, np.float64).reshape(-1, 2), np.float32).copy()
+            flags = cv2.OPTFLOW_USE_INITIAL_FLOW
+        p1, st, err = cv2.calcOpticalFlowPyrLK(
+            pyrI[0], pyrJ[0], np.ascontiguousarray(p0, np.float32).reshape(-1, 1, 2), init,
+            winSize=(self.win, self.win), maxLevel=self.levels - 1, criteria=self.crit, flags=flags,
+            minEigThreshold=self.min_eig)
+        p1 = p1.reshape(-1, 2).astype(np.float64)
+        H, W = pyrJ[0].shape
+        ok = (st.reshape(-1) == 1) & (err.reshape(-1) / 255.0 < self.max_res) & np.isfinite(p1).all(1)
+        ok &= (p1[:, 0] >= 0) & (p1[:, 0] <= W - 1) & (p1[:, 1] >= 0) & (p1[:, 1] <= H - 1)
+        return p1, ok
+
+    def track_fb(self, pyrI, pyrJ, p0, p_init=None, fb_max=1.0):
+        p1, ok = self.track(pyrI, pyrJ, p0, p_init)
+        if ok.any():
+            pb, okb = self.track(pyrJ, pyrI, p1[ok], p0[ok])
+            fb = np.full(len(p0), np.inf)
+            fb[ok] = np.where(okb, np.linalg.norm(pb - p0[ok], axis=1), np.inf)
+            ok &= fb < fb_max
+        return p1, ok
+
+
 class KLT:
     def __init__(self, win=15, levels=3, iters=10, eps=0.03, min_eig=1e-6, max_res=0.15):
         self.win, self.levels, self.iters, self.eps = win, levels, iters, eps

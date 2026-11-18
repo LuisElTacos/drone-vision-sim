@@ -11,6 +11,74 @@ from vision.klt import KLT
 from vision.matching import _match_corners, _window_norms
 from vision.imu import Preintegration, so3_exp, skew, orthonormalize
 from scipy.optimize import least_squares
+from numba import njit
+
+# ---- noyaux numba du back-end (mêmes formules que la version numpy d'origine) ----------------------------
+@njit(cache=True)
+def _reproj_nb(Rs, ps, P, F, Li, C, UV, p_bc, R_bc, f, cx, cy, sig):
+    n = len(F)
+    r = np.empty((n, 2))
+    Pb = np.empty((n, 3))
+    Pc = np.empty((n, 3))
+    Zs = np.empty(n)
+    valid = np.empty(n, np.bool_)
+    for k in range(n):
+        Rf = Rs[F[k]]
+        d = P[Li[k]] - ps[F[k]]
+        for i in range(3):
+            Pb[k, i] = Rf[0, i] * d[0] + Rf[1, i] * d[1] + Rf[2, i] * d[2]
+        q = Pb[k] - p_bc[C[k]]
+        for j in range(3):
+            Pc[k, j] = q[0] * R_bc[0, j] + q[1] * R_bc[1, j] + q[2] * R_bc[2, j]
+        Z = Pc[k, 2]
+        valid[k] = Z > 0.05
+        Zs[k] = Z if Z > 0.05 else 0.05
+        r[k, 0] = (f * Pc[k, 0] / Zs[k] + cx - UV[k, 0]) / sig
+        r[k, 1] = (f * Pc[k, 1] / Zs[k] + cy - UV[k, 1]) / sig
+    return r, Pb, Pc, Zs, valid
+
+
+@njit(cache=True)
+def _linearize_nb(Rs, F, Li, r, Pb, Pc, Z, valid, R_bc, f, sig, huber, nF, nL):
+    """Accumulation des blocs normaux de reprojection : Hll (nL,3,3), gl (nL,3), Hpp6 (nF-1,6,6), gp6 (nF-1,6), Hpl6 (nF-1,6,nL,3)."""
+    Hll = np.zeros((nL, 3, 3))
+    gl = np.zeros((nL, 3))
+    Hpp6 = np.zeros((nF - 1, 6, 6))
+    gp6 = np.zeros((nF - 1, 6))
+    Hpl6 = np.zeros((nF - 1, 6, nL, 3))
+    RbT = np.ascontiguousarray(R_bc.T)
+    for k in range(len(F)):
+        e = np.sqrt(r[k, 0] ** 2 + r[k, 1] ** 2)
+        w = 1.0 if e < huber else huber / max(e, 1e-9)
+        if not valid[k]:
+            w = 0.0
+        fz = f / Z[k] / sig
+        Jp = np.zeros((2, 3))
+        Jp[0, 0] = fz
+        Jp[0, 2] = -fz * Pc[k, 0] / Z[k]
+        Jp[1, 1] = fz
+        Jp[1, 2] = -fz * Pc[k, 1] / Z[k]
+        JR = Jp @ RbT
+        A = JR @ np.ascontiguousarray(Rs[F[k]].T)
+        sk = np.zeros((3, 3))
+        sk[0, 1] = -Pb[k, 2]; sk[0, 2] = Pb[k, 1]
+        sk[1, 0] = Pb[k, 2];  sk[1, 2] = -Pb[k, 0]
+        sk[2, 0] = -Pb[k, 1]; sk[2, 1] = Pb[k, 0]
+        Jth = JR @ sk
+        Jx = np.empty((2, 6))
+        Jx[:, 0:3] = Jth
+        Jx[:, 3:6] = -A
+        wr = w * r[k]
+        l = Li[k]
+        Hll[l] += w * (A.T @ A)
+        gl[l] += A.T @ wr
+        if F[k] > 0:
+            fi = F[k] - 1
+            Hpp6[fi] += w * (Jx.T @ Jx)
+            gp6[fi] += Jx.T @ wr
+            Hpl6[fi, :, l, :] += w * (Jx.T @ A)
+    return Hll, gl, Hpp6, gp6, Hpl6
+
 
 
 # ---- A. Matrice fondamentale + RANSAC ---------------------------------------
@@ -318,19 +386,10 @@ class VIO:
         Chaîne : monde -> corps (R^T (P - p)) -> caméra (R_bc^T (Pb - p_bc[C])) -> pixel (f X/Z + cx, f Y/Z + cy).
         Retourne r = (uv_prédit - UV)/sigma_px, plus ce dont on a besoin ensuite (Pb, Pc, Z borné, masque Z > 0.05).
         """
-        Rf = Rs[F]  # rotations maintenant indexées par F
-        pf = ps[F]  # positions des cam indexées par F
-        Pw = P[Li]  # points 3D des observations
-        d = Pw - pf
-        Pb = np.matmul(Rf.transpose(0, 2, 1), d[:, :, None])[:, :, 0]
-        Pc = (Pb - self.p_bc[C]) @ self.R_bc
-        Z = Pc[:, 2]
-        Zs = np.where(Z > 0.05, Z, 0.05)
-        uv = np.column_stack(
-            [self.f * Pc[:, 0] / Zs + self.cx, self.f * Pc[:, 1] / Zs + self.cy]
-        )
-        r = (uv - UV) / self.sig
-        return r, Pb, Pc, Zs, Z > 0.05
+        c = np.ascontiguousarray
+        return _reproj_nb(c(Rs, dtype=float), c(ps, dtype=float), c(P, dtype=float), c(F, dtype=np.int64), c(Li, dtype=np.int64),
+                          c(C, dtype=np.int64), c(UV, dtype=float), c(np.asarray(self.p_bc, float)), c(np.asarray(self.R_bc, float)),
+                          float(self.f), float(self.cx), float(self.cy), float(self.sig))
 
     def _observations(self):
         """Tableaux des observations des points vus dans >= 2 images de la fenêtre."""
@@ -406,42 +465,15 @@ class VIO:
             Hpl = np.zeros((npo, nL, 3))
             if len(F):
                 r, Pb, Pc, Z, valid = self._reproj(Rs, ps, P, F, Li, C, UV)
-                e = np.linalg.norm(r, axis=1)
-                w = (
-                    np.where(e < self.huber, 1.0, self.huber / np.maximum(e, 1e-9))
-                    * valid
-                )
-                fz = self.f / Z / self.sig
-                Jp = np.zeros((len(F), 2, 3))
-                Jp[:, 0, 0] = fz
-                Jp[:, 0, 2] = -fz * Pc[:, 0] / Z
-                Jp[:, 1, 1] = fz
-                Jp[:, 1, 2] = -fz * Pc[:, 1] / Z
-                JpRcb = Jp @ self.R_bc.T  # dr/dPb
-                A = np.einsum("nij,nkj->nik", JpRcb, Rs[F])  # dr/dPw = Jp R_bc^T R_f^T
-                Jth = JpRcb @ skew(Pb)
-                Jx = np.concatenate([Jth, -A], axis=2)  # (n, 2, 6) : θ, p de l'image
-                wr = w[:, None] * r
-                # landmarks
-                np.add.at(Hll, Li, w[:, None, None] * np.einsum("nki,nkj->nij", A, A))
-                np.add.at(gl, Li, np.einsum("nki,nk->ni", A, wr))
-                m = F > 0
-                if m.any():
-                    Fi, Lm = F[m] - 1, Li[m]
-                    Hxx = w[m, None, None] * np.einsum("nki,nkj->nij", Jx[m], Jx[m])
-                    gx = np.einsum("nki,nk->ni", Jx[m], wr[m])
-                    Hxl = w[m, None, None] * np.einsum("nki,nkj->nij", Jx[m], A[m])
-                    Hpp6 = np.zeros((nF - 1, 6, 6))
-                    np.add.at(Hpp6, Fi, Hxx)
-                    gp6 = np.zeros((nF - 1, 6))
-                    np.add.at(gp6, Fi, gx)
-                    Hpl6 = np.zeros((nF - 1, 6, nL, 3))
-                    np.add.at(Hpl6, (Fi, slice(None), Lm), Hxl)
-                    for k in range(nF - 1):
-                        s = 9 * k
-                        Hpp[s : s + 6, s : s + 6] += Hpp6[k]
-                        gp[s : s + 6] += gp6[k]
-                        Hpl[s : s + 6] += Hpl6[k]
+                Hll, gl, Hpp6, gp6, Hpl6 = _linearize_nb(
+                    np.ascontiguousarray(Rs, dtype=float), np.ascontiguousarray(F, dtype=np.int64), np.ascontiguousarray(Li, dtype=np.int64),
+                    r, Pb, Pc, Z, valid, np.ascontiguousarray(self.R_bc, dtype=float), float(self.f), float(self.sig), float(self.huber),
+                    nF, nL)
+                for k in range(nF - 1):
+                    sk = 9 * k
+                    Hpp[sk : sk + 6, sk : sk + 6] += Hpp6[k]
+                    gp[sk : sk + 6] += gp6[k]
+                    Hpl[sk : sk + 6] += Hpl6[k]
             # IMU
             for i in range(1, nF):
                 ri, Ji, Jj = self.frames[i].preint.residual(

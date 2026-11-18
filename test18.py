@@ -131,6 +131,8 @@ def main():
     scene.building_mode = mode
     if mode == sim.ENV_FOREST:
         scene.forest_seed = args.seed
+    if mode == sim.ENV_CITY:
+        scene.city_seed = args.seed   # ville fixe, la graine tire départ et cible
     pos, yaw = scene.spawn(mode)
     if mode == sim.ENV_FOREST:
         scene.ensure_forest()
@@ -186,6 +188,8 @@ def main():
         traj.append(nxt.copy())
         if scene.forest is not None:
             min_clear = min(min_clear, clearance_trees(scene, nxt))
+        elif scene.city is not None and mode == sim.ENV_CITY:
+            min_clear = min(min_clear, scene.city.clearance(nxt))
     glfw.destroy_window(window)
     glfw.terminate()
 

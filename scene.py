@@ -33,6 +33,7 @@ from building import ProceduralBuilding
 from collision import Box, Ground, Sphere
 from gltf_loader import bounds, load_glb
 from forest_env import FOREST_DENSITY_DEFAULT, ForestAssets, ForestEnv
+from city_env import CityAssets, CityEnv
 from ui_panel import PANEL_WIDTH, SidePanel
 import mujoco_flight
 from mujoco_flight import MujocoFlight
@@ -50,8 +51,8 @@ WORLD_CAMERA_POSITION = (12.0, 9.0, 6.0)   # caméra fixe du monde
 WORLD_CAMERA_TARGET = (0.0, 3.0, -10.0)
 
 # Environnements : valeur de settings["building_mode"]
-ENV_BUILDING, ENV_WALLS, ENV_EMPTY, ENV_FOREST = 0, 1, 2, 3
-ENV_NAMES = {"batiment": ENV_BUILDING, "murs": ENV_WALLS, "vide": ENV_EMPTY, "foret": ENV_FOREST}
+ENV_BUILDING, ENV_WALLS, ENV_EMPTY, ENV_FOREST, ENV_CITY = 0, 1, 2, 3, 4
+ENV_NAMES = {"batiment": ENV_BUILDING, "murs": ENV_WALLS, "vide": ENV_EMPTY, "foret": ENV_FOREST, "ville": ENV_CITY}
 BUILDING_SPAWN = ((-2.7, 1.4, 2.0), -90.0)
 
 
@@ -313,6 +314,10 @@ class Scene:
         self.forest = None
         self.forest_seed = maze_seed
         self.forest_density = FOREST_DENSITY_DEFAULT
+        # Ville (placée en z = 120) : chargée à la première sélection (GLB, textures, boîtes de collision)
+        self.city_assets = None
+        self.city = None
+        self.city_seed = maze_seed
         v, i = make_sphere(0.25)
         self.target_vao = self.make_vao(v, i)
 
@@ -333,6 +338,8 @@ class Scene:
             return [*self.base_colliders, *self.wall_maze.colliders]
         if self.building_mode == ENV_FOREST and self.forest is not None:
             return [*self.base_colliders, *self.forest.colliders]
+        if self.building_mode == ENV_CITY and self.city is not None:
+            return [*self.base_colliders, *self.city.colliders]
         return self.base_colliders
 
     def ensure_forest(self):
@@ -341,6 +348,18 @@ class Scene:
             self.forest = ForestEnv(self.ctx, self.forest_assets, seed=self.forest_seed,
                                     tree_density=self.forest_density)
         return self.forest
+
+    def ensure_city(self):
+        if self.city is None:
+            self.city_assets = CityAssets(self.ctx)
+            self.city = CityEnv(self.ctx, self.city_assets, seed=self.city_seed)
+        return self.city
+
+    def regenerate_city(self, seed):
+        """Même ville, nouveau tirage du départ et de la cible."""
+        self.ensure_city().release()
+        self.city_seed = seed
+        self.city = CityEnv(self.ctx, self.city_assets, seed=seed)
 
     def regenerate_forest(self, seed, density=None):
         self.ensure_forest().release()
@@ -358,6 +377,8 @@ class Scene:
             return self.wall_maze.spawn
         if mode == ENV_FOREST:
             return self.ensure_forest().spawn
+        if mode == ENV_CITY:
+            return self.ensure_city().spawn
         return BUILDING_SPAWN
 
     def overview_camera(self, mode):
@@ -365,6 +386,8 @@ class Scene:
             return self.wall_maze.overview_camera
         if mode == ENV_FOREST:
             return self.ensure_forest().overview_camera
+        if mode == ENV_CITY:
+            return self.ensure_city().overview_camera
         return WORLD_CAMERA_POSITION, WORLD_CAMERA_TARGET
 
     def target(self):
@@ -373,6 +396,8 @@ class Scene:
             return self.wall_maze.target
         if self.building_mode == ENV_FOREST and self.forest is not None:
             return self.forest.target
+        if self.building_mode == ENV_CITY and self.city is not None:
+            return self.city.target
         return None
 
     def target_items(self):
@@ -433,6 +458,8 @@ class Scene:
             self.wall_maze.render(camera, aspect, light_dir=(-0.4, -1.0, -0.3))
         elif self.building_mode == ENV_FOREST and self.forest is not None:
             self.forest.render(camera, aspect, light_dir=(-0.4, -1.0, -0.3))
+        elif self.building_mode == ENV_CITY and self.city is not None:
+            self.city.render(camera, aspect, light_dir=(-0.4, -1.0, -0.3))
 
         # 2. Rendu des objets standard (sol, sphère, drone)
         self.prog["u_proj"].write(camera.projection(aspect).T.copy().tobytes())
@@ -709,6 +736,9 @@ def main():
         "regen_forest_density": False,
         "forest_spawn": None,
         "forest_info": [],
+        "regen_city": False,       # bouton « Nouveau départ / cible » de la ville
+        "city_spawn": None,
+        "city_info": [],
         "cams_on_chassis": drone.cams_on_chassis,  # False : caméras stabilisées
     }
     last_mode = start_mode
@@ -744,8 +774,20 @@ def main():
             f"{counts['arbre']} pins",
         ]
 
+    def update_city_info():
+        city = scene.city
+        if city is None:
+            return
+        settings["city_spawn"] = city.spawn
+        settings["city_info"] = [
+            f"Graine : {city.seed}",
+            f"Départ -> cible : {city.geodesic:.0f} m par les rues",
+            f"{len(city.assets.boxes)} boîtes de collision",
+        ]
+
     update_env_info()
     update_forest_info()
+    update_city_info()
 
     state = {"captured": False, "last": None, "mouse_yaw_delta": 0.0}
 
@@ -903,11 +945,19 @@ def main():
             scene.regenerate_forest(scene.forest_seed, settings["forest_density"] / 100.0)
             update_forest_info()
             last_mode = None
+        if settings.get("regen_city"):
+            settings["regen_city"] = False
+            scene.regenerate_city(random.randrange(100000))
+            update_city_info()
+            last_mode = None
         if b_mode != last_mode:
             last_mode = b_mode
             if b_mode == ENV_FOREST:
                 scene.ensure_forest()
                 update_forest_info()
+            if b_mode == ENV_CITY:
+                scene.ensure_city()
+                update_city_info()
             world_cam.position, world_cam.target = (np.array(p, dtype="f4") for p in scene.overview_camera(b_mode))
             t_pos, t_yaw = scene.spawn(b_mode)
             drone.position = np.array(t_pos, dtype="f8")

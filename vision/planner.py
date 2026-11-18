@@ -3,6 +3,49 @@ import heapq as h
 import math
 from scipy.ndimage import distance_transform_edt
 
+def classify_fenetre(vmap, pos, y_min, y_max, r_total, rayon=8.0, k_unk=0.35, k_prox=3.0,
+                     seuil_occ=0.0, seuil_free=0.0, d_secu=0.8, details=False):
+    vs = vmap.voxel_size
+    j_min = max(0, int(np.ceil((y_min - vmap.origin[1]) / vs)))
+    j_max = min(vmap.shape[1] - 1, int(np.floor((y_max - vmap.origin[1]) / vs)))
+    L = vmap.map[:, j_min:j_max + 1, :]
+    nx, _, nz = L.shape
+
+    occ = L > seuil_occ
+    unknown = (~occ) & (L >= -seuil_free)
+
+    # fenêtre horizontale autour du drone (indices x et z), plus une marge pour ne pas perdre
+    # les obstacles juste hors fenêtre dans le calcul des distances
+    ix = int(np.clip((pos[0] - vmap.origin[0]) / vs, 0, nx - 1))
+    iz = int(np.clip((pos[2] - vmap.origin[2]) / vs, 0, nz - 1))
+    h = int(np.ceil(rayon / vs))
+    pad = int(np.ceil(max(r_total, d_secu) / vs)) + 1
+    xi0, xi1 = max(0, ix - h), min(nx, ix + h + 1)          # fenêtre utile
+    zi0, zi1 = max(0, iz - h), min(nz, iz + h + 1)
+    x0, x1 = max(0, xi0 - pad), min(nx, xi1 + pad)          # fenêtre de calcul (avec marge)
+    z0, z1 = max(0, zi0 - pad), min(nz, zi1 + pad)
+
+    # distances : seulement dans la fenêtre de calcul
+    occ_w = occ[x0:x1, :, z0:z1]
+    if occ_w.any():
+        dist_w = distance_transform_edt(~occ_w) * vs
+    else:
+        dist_w = np.full(occ_w.shape, np.inf)
+    sx = slice(xi0 - x0, xi1 - x0)
+    sz = slice(zi0 - z0, zi1 - z0)
+    dist = np.full(L.shape, np.inf, np.float32)             # hors fenêtre : distance inconnue = infinie
+    dist[xi0:xi1, :, zi0:zi1] = dist_w[sx, :, sz]
+
+    # sorties : hors fenêtre, obstacles non gonflés et pas de coût de proximité
+    blocked = occ | (dist < r_total)
+    cost_extra = (k_unk * unknown).astype(np.float32)
+    prox_w = np.clip((d_secu - dist[xi0:xi1, :, zi0:zi1]) / d_secu, 0, 1) ** 2
+    cost_extra[xi0:xi1, :, zi0:zi1] += (k_prox * prox_w).astype(np.float32)
+    if details:
+        libre = L < -seuil_free
+        return blocked, cost_extra, j_min, libre, dist
+    return blocked, cost_extra, j_min
+
 def classify(vmap, y_min, y_max, r_total, k_unk=0.35, k_prox=3.0, seuil_occ=0.0, seuil_free=0.0, d_secu=0.8, details=False):    
     vs = vmap.voxel_size
 
