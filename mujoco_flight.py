@@ -11,9 +11,11 @@ Repère du corps MuJoCo : x avant, y gauche, z haut.
 """
 
 import math
+import operator
 
 import mujoco
 import numpy as np
+from numba import njit
 
 from collision import Box, Ground, Sphere, VerticalCylinder
 
@@ -31,6 +33,42 @@ YAW_ERR_MAX = math.radians(60.0)
 
 # Changement de repère MuJoCo -> simulateur
 C_MJ_TO_SIM = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]])
+
+
+@njit(cache=True)
+def _control_nb(R, v, w, v_des, psi_des, v_int, ki, kv, tilt_max, J, A_inv, f_max):
+    """Contrôleur en cascade (voir MujocoFlight._control) ; met à jour v_int en place."""
+    for i in range(3):
+        v_int[i] = min(max(v_int[i] + ki * (v_des[i] - v[i]) * TIMESTEP, -I_MAX), I_MAX)
+    a = kv * (v_des - v) + v_int
+    a_h = math.sqrt(a[0] * a[0] + a[1] * a[1])
+    if a_h > ACC_MAX:
+        a[0] *= ACC_MAX / a_h
+        a[1] *= ACC_MAX / a_h
+    f = MASS * (a + np.array([0.0, 0.0, G]))
+    f[2] = max(f[2], 0.2 * MASS * G)
+    horiz = math.sqrt(f[0] * f[0] + f[1] * f[1])
+    lim = f[2] * math.tan(tilt_max)
+    if horiz > lim:
+        f[0] *= lim / horiz
+        f[1] *= lim / horiz
+    b3 = f / math.sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2])
+    c = np.array([math.cos(psi_des), math.sin(psi_des), 0.0])
+    b2 = np.cross(b3, c)
+    b2 = b2 / math.sqrt(b2[0] * b2[0] + b2[1] * b2[1] + b2[2] * b2[2])
+    Rd = np.empty((3, 3))
+    Rd[:, 0] = np.cross(b2, b3)
+    Rd[:, 1] = b2
+    Rd[:, 2] = b3
+    E = 0.5 * (Rd.T @ R - R.T @ Rd)
+    e_R = np.array([E[2, 1], E[0, 2], E[1, 0]])
+    Jw = J @ w
+    tau = -KR * (J @ e_R) - KW * Jw + np.cross(w, Jw)
+    thrust = f[0] * R[0, 2] + f[1] * R[1, 2] + f[2] * R[2, 2]
+    u = A_inv @ np.array([thrust, tau[0], tau[1], tau[2]])
+    for i in range(4):
+        u[i] = min(max(u[i], 0.0), f_max)
+    return u
 
 
 def to_mj(p):
@@ -96,6 +134,7 @@ class MujocoFlight:
     def __init__(self, half_extents, colliders, position, yaw_deg):
         self.half = np.asarray(half_extents, dtype="f8")
         self.scene_key = None
+        self.scene_list = None
         self.model = self.data = None
         self.yaw_target = math.radians(-yaw_deg)     # lacet MuJoCo = -lacet simulateur
         self.time_tilted = 0.0
@@ -107,11 +146,16 @@ class MujocoFlight:
     # --- scène -----------------------------------------------------------------
 
     def sync_scene(self, colliders):
-        """Reconstruit le modèle si la liste des collisionneurs a changé (état du drone conservé)."""
-        key = tuple(id(c) for c in colliders)
-        if key == self.scene_key:
+        """Reconstruit le modèle si la liste des collisionneurs a changé (état du drone conservé).
+        Comparaison par identité des objets (comme l'ancienne clé tuple(id(c))), mais faite en C avec
+        map(operator.is_) au lieu d'un tuple de ~30 000 id() Python à chaque pas."""
+        prev = self.scene_key
+        if prev is not None and len(prev) == len(colliders) and (
+                colliders is self.scene_list or all(map(operator.is_, prev, colliders))):
+            self.scene_list = colliders
             return
-        self.scene_key = key
+        self.scene_key = list(colliders)
+        self.scene_list = colliders        # garde les objets (donc leurs id restent uniques)
         old = None if self.data is None else (self.data.qpos.copy(), self.data.qvel.copy())
         self.model = mujoco.MjModel.from_xml_string(drone_mjcf(self.half, colliders))
         self.data = mujoco.MjData(self.model)
@@ -170,34 +214,18 @@ class MujocoFlight:
 
     @property
     def contact(self):
-        return self.data.ncon > 0   # seul le drone est mobile : tout contact le concerne
+        # seul le drone est mobile : tout contact le concerne ; dist < 0 = interpénétration réelle
+        # (les contacts de la marge de 2 cm, sans toucher, ne comptent pas)
+        n = self.data.ncon
+        return n > 0 and bool((self.data.contact.dist[:n] < 0.0).any())
 
     # --- contrôle --------------------------------------------------------------
 
     def _control(self, v_des, psi_des):
-        R = self.data.xmat[self.bid].reshape(3, 3)
-        v = self.data.qvel[:3]
-        w = self.data.qvel[3:6]   # vitesse angulaire en repère corps
-        self.v_int = np.clip(self.v_int + self.ki * (v_des - v) * TIMESTEP, -I_MAX, I_MAX)
-        a = self.kv * (v_des - v) + self.v_int
-        a_h = np.linalg.norm(a[:2])
-        if a_h > ACC_MAX:
-            a[:2] *= ACC_MAX / a_h
-        f_des = MASS * (a + np.array([0.0, 0.0, G]))
-        f_des[2] = max(f_des[2], 0.2 * MASS * G)
-        horiz, lim = np.linalg.norm(f_des[:2]), f_des[2] * math.tan(self.tilt_max)
-        if horiz > lim:
-            f_des[:2] *= lim / horiz
-        b3 = f_des / np.linalg.norm(f_des)
-        c = np.array([math.cos(psi_des), math.sin(psi_des), 0.0])
-        b2 = np.cross(b3, c)
-        b2 /= np.linalg.norm(b2)
-        Rd = np.column_stack([np.cross(b2, b3), b2, b3])
-        E = 0.5 * (Rd.T @ R - R.T @ Rd)
-        e_R = np.array([E[2, 1], E[0, 2], E[1, 0]])
-        tau = -KR * self.J @ e_R - KW * self.J @ w + np.cross(w, self.J @ w)
-        thrust = float(f_des @ R[:, 2])
-        return np.clip(self.A_inv @ np.array([thrust, *tau]), 0.0, self.f_max)
+        R = np.ascontiguousarray(self.data.xmat[self.bid].reshape(3, 3))
+        return _control_nb(R, self.data.qvel[:3].copy(), self.data.qvel[3:6].copy(), np.asarray(v_des, float),
+                           float(psi_des), self.v_int, float(self.ki), float(self.kv), float(self.tilt_max),
+                           self.J, self.A_inv, float(self.f_max))
 
     def step(self, dt, v_world, yaw_rate_deg):
         """Avance de dt secondes. v_world : vitesse voulue en repère simulateur (m/s)."""

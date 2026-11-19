@@ -1,418 +1,259 @@
-"""Étape 3 : appariement stéréo des coins de Harris (cas rectifié).
-
-Les deux caméras sont parallèles et décalées le long de leur axe x : la ligne épipolaire
-d'un pixel (uL, vL) dans l'image droite est la même ligne vL. Un coin gauche ne peut donc
-être apparié qu'à un coin droit situé sur (presque) la même ligne, et plus à gauche
-(disparité d = uL - uR >= 0).
-
-Chaîne :
-  1. candidats : coins droits avec |vR - vL| <= row_tol et 0 <= uL - uR <= max_disp
-  2. score : ZNCC (corrélation croisée normalisée centrée) entre fenêtres autour des coins
-  3. filtres : score minimal, test du ratio (ambiguïté), cohérence gauche-droite
-  4. raffinement sous-pixel de uR : recherche le long de la ligne vL dans l'image droite
-     puis ajustement d'une parabole sur le score ZNCC
-
-Sortie : ptsL, ptsR (N, 2) float64, colonnes [u, v], avec vR = vL (cas rectifié),
-et scores (N,) ; directement utilisables par triangulate(uL, vL, uR, vR, ...).
-"""
-
 import numpy as np
 import cv2
 from numba import njit, prange
-from numpy.lib.stride_tricks import sliding_window_view
 
 
-def to_gray(img):
-    """Image RGB uint8 (H, W, 3) -> niveaux de gris float32 dans [0, 1]."""
+def to_gray(img, version="numba"):
+    """Image RGB uint8 (H, W, 3) -> niveaux de gris float32 dans [0, 1].
+    version="numba" : même calcul pixel par pixel en parallèle (résultat identique) ; "numpy" : version d'origine."""
+    if version == "numba" and img.ndim == 3 and img.dtype == np.uint8 and img.shape[2] >= 3:
+        return _gray_nb(img)
     if img.ndim == 2:
         return img.astype(np.float32) / (255.0 if img.dtype == np.uint8 else 1.0)
     rgb = img[..., :3].astype(np.float32) / 255.0
     return rgb @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
 
-def extract_patches(gray, xs, ys, half):
-    """Fenêtres (2*half+1)^2 centrées sur (xs, ys) entiers, aplaties : (N, (2h+1)^2).
-
-    L'image est complétée par réflexion pour les points proches du bord.
-    """
-    padded = np.pad(gray, half, mode="reflect")
-    win = sliding_window_view(padded, (2 * half + 1, 2 * half + 1))
-    xs = np.asarray(xs, dtype=np.int64)
-    ys = np.asarray(ys, dtype=np.int64)
-    return win[ys, xs].reshape(len(xs), -1)
-
-
-def normalize_patches(P, min_std=1e-3):
-    """Centre et normalise chaque fenêtre (pour la ZNCC). Renvoie (P_norm, texture_ok).
-
-    texture_ok = False pour une fenêtre presque uniforme (écart-type < min_std) :
-    sa ZNCC n'a pas de sens, elle est mise à 0.
-    """
-    P = P - P.mean(axis=1, keepdims=True)
-    std = P.std(axis=1)
-    ok = std > min_std
-    norm = np.linalg.norm(P, axis=1)
-    P = np.where(ok[:, None], P / np.where(ok, norm, 1.0)[:, None], 0.0)
-    return P, ok
-
-
-def zncc_matrix(PL, PR):
-    """ZNCC entre toutes les fenêtres gauche et droite (déjà normalisées) : (NL, NR) dans [-1, 1]."""
-    return PL @ PR.T
-
-
-def refine_subpixel(grayL, grayR, uL, vL, uR0, half, search=2):
-    """Raffine uR (entier) le long de la ligne vL de l'image droite.
-
-    On évalue la ZNCC de la fenêtre gauche contre les fenêtres droites centrées en
-    uR0 - search ... uR0 + search (même ligne vL), on garde le meilleur entier puis on
-    ajuste une parabole sur ses deux voisins : décalage = (s- - s+) / (2 (s- - 2 s0 + s+)).
-    Renvoie (uR raffiné float64, score au meilleur entier).
-    """
-    H, W = grayR.shape
-    n = len(uL)
-    if n == 0:
-        return np.empty(0), np.empty(0)
-    offs = np.arange(-search - 1, search + 2)               # une colonne de marge pour la parabole
-    PL, _ = normalize_patches(extract_patches(grayL, uL, vL, half))
-    cols = np.clip(uR0[:, None] + offs[None, :], 0, W - 1)  # (n, K)
-    rows = np.repeat(vL[:, None], len(offs), axis=1)
-    PR, _ = normalize_patches(extract_patches(grayR, cols.ravel(), rows.ravel(), half))
-    S = np.einsum("nk,nmk->nm", PL, PR.reshape(n, len(offs), -1))   # (n, K)
-
-    inner = S[:, 1:-1]                                      # positions -search..+search
-    k = np.argmax(inner, axis=1) + 1                        # indice dans S
-    idx = np.arange(n)
-    s_m, s_0, s_p = S[idx, k - 1], S[idx, k], S[idx, k + 1]
-    denom = s_m - 2.0 * s_0 + s_p
-    delta = np.where(denom < -1e-9, 0.5 * (s_m - s_p) / np.where(denom < -1e-9, denom, -1.0), 0.0)
-    delta = np.clip(delta, -0.5, 0.5)
-    uR = uR0 + offs[k] + delta
-    return uR.astype(np.float64), s_0
-
-
-def match_stereo(imgL, imgR, cornersL, cornersR, half_win=5, max_disp=160, row_tol=1,
-                 min_zncc=0.8, ratio=0.8, lr_check=True, subpixel=True):
-    """Apparie les coins de Harris gauche et droite d'une paire rectifiée.
-
-    imgL, imgR : (H, W, 3) uint8 RGB ou (H, W) gris.
-    cornersL, cornersR : sorties de detect_corners, (N, 3) [x, y, score] (x = colonne, y = ligne).
-    half_win : demi-taille de la fenêtre de corrélation (5 -> 11x11).
-    max_disp : disparité max en pixels (= profondeur min f*B/max_disp, ~0,47 m ici).
-    row_tol : écart de ligne toléré entre les deux coins (pixels).
-    min_zncc : score minimal accepté.
-    ratio : test d'ambiguïté, on garde si (1 - s1) < ratio * (1 - s2), s2 = 2e meilleur score.
-    lr_check : le meilleur coin gauche du coin droit choisi doit être le coin de départ.
-    subpixel : raffine uR le long de la ligne vL (sinon uR = colonne entière du coin droit).
-
-    Renvoie ptsL (N, 2), ptsR (N, 2) float64 [u, v] et scores (N,) float64.
-    """
-    empty = (np.empty((0, 2)), np.empty((0, 2)), np.empty(0))
-    if len(cornersL) == 0 or len(cornersR) == 0:
-        return empty
-
-    grayL, grayR = to_gray(imgL), to_gray(imgR)
-    xL = np.rint(cornersL[:, 0]).astype(np.int64)
-    yL = np.rint(cornersL[:, 1]).astype(np.int64)
-    xR = np.rint(cornersR[:, 0]).astype(np.int64)
-    yR = np.rint(cornersR[:, 1]).astype(np.int64)
-
-    PL, okL = normalize_patches(extract_patches(grayL, xL, yL, half_win))
-    PR, okR = normalize_patches(extract_patches(grayR, xR, yR, half_win))
-    S = zncc_matrix(PL, PR)                                   # (NL, NR)
-
-    # Contrainte épipolaire (même ligne) et disparité positive bornée
-    d = xL[:, None] - xR[None, :]
-    allowed = (np.abs(yL[:, None] - yR[None, :]) <= row_tol) & (d >= 0) & (d <= max_disp)
-    allowed &= okL[:, None] & okR[None, :]
-    S = np.where(allowed, S, -np.inf)
-
-    # Meilleur et deuxième meilleur candidat pour chaque coin gauche
-    order = np.argsort(-S, axis=1)
-    rows = np.arange(len(xL))
-    j1 = order[:, 0]
-    s1 = S[rows, j1]
-    s2 = S[rows, order[:, 1]] if S.shape[1] > 1 else np.full(len(xL), -np.inf)
-
-    keep = np.isfinite(s1) & (s1 >= min_zncc)
-    # Test du ratio : un 2e candidat presque aussi bon = motif répété, appariement ambigu
-    keep &= ~np.isfinite(s2) | ((1.0 - s1) < ratio * (1.0 - s2))
-    if lr_check:
-        best_left_of_right = np.argmax(S, axis=0)             # (NR,)
-        keep &= best_left_of_right[j1] == rows
-
-    i = np.nonzero(keep)[0]
-    j = j1[i]
-    if len(i) == 0:
-        return empty
-
-    uL = xL[i].astype(np.float64)
-    vL = yL[i].astype(np.float64)
-    if subpixel:
-        uR, score = refine_subpixel(grayL, grayR, xL[i], yL[i], xR[j], half_win)
-    else:
-        uR, score = xR[j].astype(np.float64), s1[i]
-
-    ptsL = np.column_stack([uL, vL])
-    ptsR = np.column_stack([uR, vL])                          # cas rectifié : vR = vL
-    return ptsL, ptsR, np.asarray(score, dtype=np.float64)
-
-
-def _row_zncc(PL_norm, grayR, xs0, ys, ndisp, half):
-    """ZNCC de chaque fenêtre gauche contre les fenêtres droites de sa ligne.
-
-    Fenêtre droite k centrée en colonne xs0 - k (k = 0..ndisp-1, disparité k).
-    Renvoie S (n, ndisp), -inf hors image ou fenêtre uniforme.
-    """
-    H, W = grayR.shape
-    n = len(xs0)
-    k = np.arange(ndisp)
-    cols = xs0[:, None] - k[None, :]
-    inside = (cols >= 0) & (cols < W)
-    cols_c = np.clip(cols, 0, W - 1)
-    rows = np.repeat(ys[:, None], ndisp, axis=1)
-    PR, okR = normalize_patches(extract_patches(grayR, cols_c.ravel(), rows.ravel(), half))
-    S = np.einsum("nk,nmk->nm", PL_norm, PR.reshape(n, ndisp, -1))
-    return np.where(inside & okR.reshape(n, ndisp), S, -np.inf)
-
-
-def match_along_rows_ref(imgL, imgR, cornersL, half_win=5, max_disp=160, min_zncc=0.8,
-                     ratio=0.6, lr_check=True, subpixel=True, chunk=256):
-    """Variante : chaque coin gauche est cherché dans TOUTE sa ligne de l'image droite.
-
-    Pas besoin que Harris trouve le même coin à droite (utile en forêt : feuillage, coins
-    instables d'une image à l'autre). Pour chaque coin gauche (uL, vL) :
-      - ZNCC contre les fenêtres droites (uL - d, vL), d = 0..max_disp
-      - meilleur score s1 en d1 ; s2 = meilleur score hors de d1 ± 2 (pic secondaire)
-      - test du ratio (1 - s1) < ratio (1 - s2) et s1 >= min_zncc
-      - cohérence gauche-droite : en repartant de la fenêtre droite trouvée et en cherchant
-        dans la ligne gauche, on doit retomber sur uL (± 1 px)
-      - raffinement sous-pixel par parabole sur S(d1 - 1), S(d1), S(d1 + 1)
-    Renvoie ptsL, ptsR (N, 2) [u, v] et scores (N,), comme match_stereo.
-    """
-    empty = (np.empty((0, 2)), np.empty((0, 2)), np.empty(0))
-    if len(cornersL) == 0:
-        return empty
-    grayL, grayR = to_gray(imgL), to_gray(imgR)
-    H, W = grayL.shape
-    xL = np.rint(cornersL[:, 0]).astype(np.int64)
-    yL = np.rint(cornersL[:, 1]).astype(np.int64)
-    ndisp = max_disp + 1
-    PL, okL = normalize_patches(extract_patches(grayL, xL, yL, half_win))
-
-    out_uR = np.full(len(xL), np.nan)
-    out_s = np.full(len(xL), -np.inf)
-    keep = np.zeros(len(xL), dtype=bool)
-    for a in range(0, len(xL), chunk):
-        sl = slice(a, a + chunk)
-        n = len(xL[sl])
-        S = _row_zncc(PL[sl], grayR, xL[sl], yL[sl], ndisp, half_win)
-        idx = np.arange(n)
-        d1 = np.argmax(S, axis=1)
-        s1 = S[idx, d1]
-        masked = S.copy()
-        near_peak = np.abs(np.arange(ndisp)[None, :] - d1[:, None]) <= 2
-        masked[near_peak] = -np.inf
-        s2 = masked.max(axis=1)
-        ok = okL[sl] & np.isfinite(s1) & (s1 >= min_zncc)
-        ok &= ~np.isfinite(s2) | ((1.0 - s1) < ratio * (1.0 - s2))
-
-        if lr_check:
-            # fenêtre droite trouvée -> recherche dans la ligne gauche (colonnes xR + d)
-            xR = xL[sl] - d1
-            # (images retournées gauche-droite pour réutiliser _row_zncc : colonne x -> W-1-x)
-            PRb, _ = normalize_patches(extract_patches(grayR[:, ::-1], (W - 1) - xR, yL[sl], half_win))
-            Sb = _row_zncc(PRb, grayL[:, ::-1], (W - 1) - xR, yL[sl], ndisp, half_win)
-            back = xR + np.argmax(Sb, axis=1)          # colonne gauche retrouvée
-            ok &= np.abs(back - xL[sl]) <= 1
-
-        # parabole sur la disparité (S décroît de part et d'autre du pic)
-        dm = np.clip(d1 - 1, 0, ndisp - 1)
-        dp = np.clip(d1 + 1, 0, ndisp - 1)
-        s_m, s_p = S[idx, dm], S[idx, dp]
-        delta = np.zeros(n)
-        if subpixel:
-            good = np.isfinite(s_m) & np.isfinite(s_p) & (d1 > 0) & (d1 < ndisp - 1)
-            denom = np.where(good, s_m - 2.0 * s1 + s_p, -1.0)
-            delta = np.where(good & (denom < -1e-9), 0.5 * (s_m - s_p) / np.minimum(denom, -1e-9), 0.0)
-            delta = np.clip(delta, -0.5, 0.5)
-        disp = d1 + delta
-        out_uR[sl] = xL[sl] - disp
-        out_s[sl] = s1
-        keep[sl] = ok
-
-    i = np.nonzero(keep)[0]
-    if len(i) == 0:
-        return empty
-    ptsL = np.column_stack([xL[i], yL[i]]).astype(np.float64)
-    ptsR = np.column_stack([out_uR[i], yL[i]]).astype(np.float64)
-    return ptsL, ptsR, out_s[i]
-
-
-# ---------------------------------------------------------------------------
-# match_along_rows optimisée (numba, images intégrales). L'ancienne version reste disponible
-# sous le nom match_along_rows_ref (même interface, résultats quasi identiques).
-# ---------------------------------------------------------------------------
-def window_stats(gray, half, min_std=1e-3):
-    """Pour chaque pixel : image complétée par réflexion, norme de la fenêtre centrée, texture ok.
-
-    Sommes des fenêtres par images intégrales (cv2.integral2, en float64).
-    """
-    w = 2 * half + 1
-    n = w * w
-    g = np.ascontiguousarray(gray, dtype=np.float32)
-    pad32 = cv2.copyMakeBorder(g, half, half, half, half, cv2.BORDER_REFLECT_101)  # = np.pad 'reflect'
-    S, SQ = cv2.integral2(pad32, sdepth=cv2.CV_64F, sqdepth=cv2.CV_64F)
-    norm, ok = _norm_from_integrals(S, SQ, g.shape[0], g.shape[1], w, min_std)
-    return pad32, norm, ok
-
-
 @njit(cache=True, parallel=True)
-def _norm_from_integrals(S, SQ, H, W, w, min_std):
-    n = w * w
-    thr = min_std * np.sqrt(n)
-    norm = np.empty((H, W))
-    ok = np.empty((H, W), dtype=np.bool_)
+def _gray_nb(img):
+    """to_gray en numba : (r/255)*0.299 + (g/255)*0.587 + (b/255)*0.114 en float32, comme la version numpy."""
+    H, W = img.shape[0], img.shape[1]
+    out = np.empty((H, W), np.float32)
+    w0, w1, w2 = np.float32(0.299), np.float32(0.587), np.float32(0.114)
+    c = np.float32(255.0)
     for y in prange(H):
         for x in range(W):
-            s1 = S[y + w, x + w] - S[y, x + w] - S[y + w, x] + S[y, x]
-            s2 = SQ[y + w, x + w] - SQ[y, x + w] - SQ[y + w, x] + SQ[y, x]
-            v = np.sqrt(max(s2 - s1 * s1 / n, 0.0))
-            norm[y, x] = v
-            ok[y, x] = v > thr
-    return norm, ok
+            out[y, x] = (np.float32(img[y, x, 0]) / c) * w0 + (np.float32(img[y, x, 1]) / c) * w1 + (np.float32(img[y, x, 2]) / c) * w2
+    return out
 
 
-@njit(cache=True, inline="always")
-def _dot(PLn, pad, y, x, half):
-    # fenêtre centrée en (y, x) de l'image d'origine = pad[y:y+2h+1, x:x+2h+1]
-    s = 0.0
-    w = 2 * half + 1
-    for a in range(w):
-        row = pad[y + a]
-        base = a * w
-        for b in range(w):
-            s += PLn[base + b] * row[x + b]
-    return s
+def _window_norms(img, half, parallel=True):
+    """Norme de (fenêtre - moyenne) centrée en chaque pixel, par images intégrales (0 sur les bords).
+    parallel=True : noyau numba parallèle sur les lignes (résultat identique) ; False : version d'origine."""
+    S, SQ = cv2.integral2(np.ascontiguousarray(img, dtype=np.float32), sdepth=cv2.CV_64F, sqdepth=cv2.CV_64F) ## permet d'accéder à la somme des I(j, i et la somme des carrés)
+    k = _norms_kernel_par if parallel else _norms_kernel
+    return k(S, SQ, img.shape[0], img.shape[1], 2 * half + 1)
 
 
 @njit(cache=True, parallel=True)
-def _match_kernel(padL, padR, normL, okL_img, normR, okR_img, xL, yL, half, ndisp,
-                  min_zncc, ratio, lr_check, subpixel):
-    n = len(xL)
-    H, W = normR.shape
+def _norms_kernel_par(S, SQ, H, W, w):
+    """_norms_kernel avec les lignes en parallèle."""
+    n = w * w
+    h = w // 2
+    out = np.zeros((H, W))
+    for y in prange(h, H - h):
+        for x in range(h, W - h):
+            s1 = S[y + h + 1, x + h + 1] - S[y - h, x + h + 1] - S[y + h + 1, x - h] + S[y - h, x - h]
+            s2 = SQ[y + h + 1, x + h + 1] - SQ[y - h, x + h + 1] - SQ[y + h + 1, x - h] + SQ[y - h, x - h]
+            out[y, x] = np.sqrt(max(s2 - s1 * s1 / n, 0.0))
+    return out
+
+
+@njit(cache=True)
+def _norms_kernel(S, SQ, H, W, w):
+    """Norme de fenêtre -moyenne pour des fenêtres de taille w×w centrées en chaque pixel, via les images intégrales S et SQ."""
+    n = w * w
+    h = w // 2
+    out = np.zeros((H, W))
+    for y in range(h, H - h):
+        for x in range(h, W - h):
+            s1 = S[y + h + 1, x + h + 1] - S[y - h, x + h + 1] - S[y + h + 1, x - h] + S[y - h, x - h]
+            s2 = SQ[y + h + 1, x + h + 1] - SQ[y - h, x + h + 1] - SQ[y + h + 1, x - h] + SQ[y - h, x - h]
+            out[y, x] = np.sqrt(max(s2 - s1 * s1 / n, 0.0))
+    return out
+
+
+@njit(cache=True)
+def _patch_norm(img, y, x, half):
+    """(patch centré / norme, norme) de la fenêtre centrée en (y, x)."""
     w = 2 * half + 1
-    npx = w * w
-    out_uR = np.full(n, np.nan)
-    out_s = np.full(n, -np.inf)
+    p = np.empty(w * w)
+    m = 0.0
+    for a in range(w):
+        for b in range(w):
+            v = img[y - half + a, x - half + b]
+            p[a * w + b] = v
+            m += v
+    m /= w * w
+    nn = 0.0
+    for t in range(w * w):
+        p[t] -= m
+        nn += p[t] * p[t]
+    nn = np.sqrt(nn)
+    if nn >= 1e-5:
+        for t in range(w * w):
+            p[t] /= nn
+    return p, nn
+
+
+@njit(cache=True)
+def _zncc(p, img, norms, y, x, half):
+    """ZNCC entre le patch normalisé p et la fenêtre centrée en (y, x) ; -1 si la fenêtre est uniforme (coût 4)."""
+    nr = norms[y, x]
+    if nr <= 1e-5:
+        return -1.0
+    w = 2 * half + 1
+    s = 0.0
+    for a in range(w):
+        for b in range(w):
+            s += p[a * w + b] * img[y - half + a, x - half + b]
+    return s / nr
+
+
+@njit(cache=True, parallel=True)
+def _match_corners(left, right, norm_l, norm_r, xg_f_all, y_coords, d_min, d_max, half, ratio, max_cost, cross_check):
+    """Corps de la boucle d'origine (un coin par itération, coins en parallèle)"""
+    H, W = left.shape
+    n = len(xg_f_all)
+    out = np.zeros((n, 5))
     keep = np.zeros(n, dtype=np.bool_)
-    for i in prange(n):
-        x0, y0 = xL[i], yL[i]
-        if not okL_img[y0, x0]:
-            continue
-        # fenêtre gauche centrée et normalisée
-        PL = np.empty(npx)
-        m = 0.0
-        for a in range(w):
-            for b in range(w):
-                v = padL[y0 + a, x0 + b]
-                PL[a * w + b] = v
-                m += v
-        m /= npx
-        nn = 0.0
-        for t in range(npx):
-            PL[t] -= m
-            nn += PL[t] * PL[t]
-        nn = np.sqrt(nn)
-        for t in range(npx):
-            PL[t] /= nn
-
-        S = np.full(ndisp, -np.inf)
-        d1 = 0
-        s1 = -np.inf
-        for k in range(ndisp):
-            x = x0 - k
-            if x < 0:
-                break
-            if okR_img[y0, x]:
-                v = _dot(PL, padR, y0, x, half) / normR[y0, x]
-                S[k] = v
-                if v > s1:
-                    s1 = v
-                    d1 = k
-        if not (s1 >= min_zncc):
-            continue
-        s2 = -np.inf
-        for k in range(ndisp):
-            if abs(k - d1) > 2 and S[k] > s2:
-                s2 = S[k]
-        if np.isfinite(s2) and not ((1.0 - s1) < ratio * (1.0 - s2)):
+    for idx in prange(n):
+        y = y_coords[idx]
+        if y - half < 0 or y + half >= H: ## si le coin est trop proche du bord on l'ignore
             continue
 
-        if lr_check:
-            xR = x0 - d1
-            PR = np.empty(npx)
-            m = 0.0
-            for a in range(w):
-                for b in range(w):
-                    v = padR[y0 + a, xR + b]
-                    PR[a * w + b] = v
-                    m += v
-            m /= npx
-            nn = 0.0
-            for t in range(npx):
-                PR[t] -= m
-                nn += PR[t] * PR[t]
-            nn = np.sqrt(nn)
-            for t in range(npx):
-                PR[t] /= nn
-            best = -np.inf
-            kb = 0
-            for k in range(ndisp):
-                x = xR + k
-                if x >= W:
-                    break
-                if okL_img[y0, x]:
-                    v = _dot(PR, padL, y0, x, half) / normL[y0, x]
-                    if v > best:
-                        best = v
-                        kb = k
-            if abs(xR + kb - x0) > 1:
+        xg_f = xg_f_all[idx]
+        xg = int(np.round(xg_f))
+
+        if xg - half < 0 or xg + half >= W: ## si le coin est trop proche du bord on l'ignore
+            continue
+
+        p_l_norm, norm_val = _patch_norm(left, y, xg, half)
+        if norm_val < 1e-5: 
+            continue  # Patch trop uniforme
+
+        d_upper = min(d_max, xg - half)
+        if d_upper < d_min + 2:
+            continue
+
+        nd = d_upper - d_min + 1
+        costs = np.empty(nd)
+        for k in range(nd):
+            d = d_min + k                      # d_vals[k]
+            zncc = _zncc(p_l_norm, right, norm_r, y, xg - d, half)
+            costs[k] = 4.0 if zncc == -1.0 else 2.0 - 2.0 * zncc
+
+        k_star = int(np.argmin(costs))
+        c_star = costs[k_star]
+        d_star = d_min + k_star
+
+        if k_star == 0 or k_star == nd - 1:
+            continue
+
+        if c_star > max_cost:
+            continue
+
+        c_second = np.inf
+        for k in range(nd):
+            if abs((d_min + k) - d_star) > 2 and costs[k] < c_second:   # mask_second
+                c_second = costs[k]
+        if not np.isfinite(c_second):
+            continue
+        if c_star > ratio * c_second:
+            continue
+
+        if cross_check:
+            xd_star = xg - d_star
+            # On recherche depuis xd_star vers la gauche sur left[y]
+            d_rev_upper = min(d_max, (W - 1 - half) - xd_star)
+            if d_rev_upper < d_min:
                 continue
 
-        delta = 0.0
-        if subpixel and d1 > 0 and d1 < ndisp - 1:
-            s_m, s_p = S[d1 - 1], S[d1 + 1]
-            if np.isfinite(s_m) and np.isfinite(s_p):
-                den = s_m - 2.0 * s1 + s_p
-                if den < -1e-9:
-                    delta = 0.5 * (s_m - s_p) / den
-                    delta = min(max(delta, -0.5), 0.5)
-        out_uR[i] = x0 - (d1 + delta)
-        out_s[i] = s1
-        keep[i] = True
-    return out_uR, out_s, keep
+            p_r_norm, _ = _patch_norm(right, y, xd_star, half)
+            nr = d_rev_upper - d_min + 1
+            costs_rev = np.empty(nr)
+            for k in range(nr):
+                zncc = _zncc(p_r_norm, left, norm_l, y, xd_star + d_min + k, half)   # xl_cand
+                costs_rev[k] = 4.0 if zncc == -1.0 else 2.0 - 2.0 * zncc
+
+            d_rev_star = d_min + int(np.argmin(costs_rev))
+            if abs(d_rev_star - d_star) > 1:
+                continue
+
+        c_prev = costs[k_star - 1]
+        c_next = costs[k_star + 1]
+        denom = 2.0 * (c_prev - 2.0 * c_star + c_next)
+
+        if abs(denom) > 1e-6:
+            delta = (c_prev - c_next) / denom
+            delta = min(max(delta, -0.5), 0.5)
+        else:
+            delta = 0.0
+
+        d_sub = d_star + delta
+        xd_sub = xg_f - d_sub
+
+        out[idx, 0] = xg_f
+        out[idx, 1] = y
+        out[idx, 2] = xd_sub
+        out[idx, 3] = d_sub
+        out[idx, 4] = c_star
+        keep[idx] = True
+    return out, keep
 
 
-def match_along_rows(imgL, imgR, cornersL, half_win=5, max_disp=160, min_zncc=0.8,
-                     ratio=0.6, lr_check=True, subpixel=True, grayL=None, grayR=None):
-    """Même interface que vision.matching.match_along_rows (+ grayL/grayR déjà calculés)."""
-    empty = (np.empty((0, 2)), np.empty((0, 2)), np.empty(0))
-    if len(cornersL) == 0:
-        return empty
-    if grayL is None:
-        grayL = to_gray(imgL)
-    if grayR is None:
-        grayR = to_gray(imgR)
-    xL = np.rint(cornersL[:, 0]).astype(np.int64)
-    yL = np.rint(cornersL[:, 1]).astype(np.int64)
-    padL, normL, okL = window_stats(grayL, half_win)
-    padR, normR, okR = window_stats(grayR, half_win)
-    uR, s, keep = _match_kernel(padL, padR, normL, okL, normR, okR, xL, yL, half_win,
-                                max_disp + 1, min_zncc, ratio, lr_check, subpixel)
-    i = np.nonzero(keep)[0]
-    if len(i) == 0:
-        return empty
-    ptsL = np.column_stack([xL[i], yL[i]]).astype(np.float64)
-    ptsR = np.column_stack([uR[i], yL[i]]).astype(np.float64)
-    return ptsL, ptsR, s[i]
+def match_stereo(left: np.ndarray, right: np.ndarray, corners_l: np.ndarray,d_min: int = 1, d_max: int = 120,
+    half: int = 5, ratio: float = 0.8, max_cost: float = 0.5, cross_check: bool = True, norms=None):
+    """norms : (normes gauche, droite, half) déjà calculées sur les mêmes images (ex. FrontEnd.norms), sinon None."""
+    if len(corners_l) == 0:
+        return np.empty((0, 5), dtype=np.float32)
+
+    left = np.ascontiguousarray(left, dtype=np.float32)
+    right = np.ascontiguousarray(right, dtype=np.float32)
+    if norms is not None and norms[2] == half:
+        norm_l, norm_r = norms[0], norms[1]
+    else:
+        norm_l = _window_norms(left, half)      # normes des fenêtres, calculées une fois pour toute l'image
+        norm_r = _window_norms(right, half)
+
+    y_coords = np.round(corners_l[:, 1]).astype(np.int64)
+    xg_f_all = np.ascontiguousarray(corners_l[:, 0], dtype=np.float64)
+
+    # images en float64 pour le noyau : le patch est déjà en float64, mêmes produits sans conversion à chaque pixel
+    out, keep = _match_corners(left.astype(np.float64), right.astype(np.float64), norm_l, norm_r, xg_f_all, y_coords,
+                               d_min, d_max, half, ratio, max_cost, cross_check)
+
+    ordre = np.argsort(y_coords, kind="stable")
+    ordre = ordre[keep[ordre]]
+    if len(ordre) == 0:
+        return np.empty((0, 5), dtype=np.float32)
+
+    return out[ordre].astype(np.float32)
+
+if __name__ == "__main__":
+    import time
+    from scipy.ndimage import shift
+
+    H, W = 480, 640
+    np.random.seed(42)
+
+    # Création d'une image gauche avec texture aléatoire lissée
+    base = np.random.uniform(0.0, 1.0, size=(H, W)).astype(np.float32)
+    from scipy.ndimage import gaussian_filter
+    left_img = gaussian_filter(base, sigma=2.0)
+
+    # Image droite décalée de d_vrai = 18.3 pixels vers la gauche
+    d_vrai = 18.3
+    right_img = shift(left_img, shift=(0, -d_vrai), order=3, mode="reflect")
+
+    # Simulation de coins artificiels réguliers
+    corners_test = np.array([
+        [150.0, 100.0, 100.0],
+        [250.0, 200.0, 120.0],
+        [400.0, 300.0, 150.0],
+    ], dtype=np.float32)
+
+    t0 = time.perf_counter()
+    res = match_stereo(left_img, right_img, corners_test, d_min=1, d_max=60)
+    t1 = time.perf_counter()
+
+    print(f"Temps appariement : {(t1 - t0)*1000:.2f} ms")
+    print(f"Appariements trouvés : {len(res)} / {len(corners_test)}")
+    if len(res) > 0:
+        print("Résultats [x_g, y, x_d, d, cout] :")
+        print(res)
+        erreurs = np.abs(res[:, 3] - d_vrai)
+        print(f"Erreur moyenne sous-pixel sur d : {np.mean(erreurs):.3f} px (attendu < 0.2 px)")
+        assert np.all(erreurs < 0.2), "Erreur de disparité sous-pixel trop élevée"
+        print("✓ Test de matching validé.")
+    

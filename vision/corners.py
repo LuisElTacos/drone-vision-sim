@@ -7,10 +7,15 @@ def _ksize(sigma):
     return 2 * int(4.0 * sigma + 0.5) + 1          # troncature de scipy (truncate = 4)
 
 
-def harris_function(img, sigma_d=1.0, sigma_i=1.5, k=0.04):
-    img = np.ascontiguousarray(img, dtype=np.float32)
+def harris_function(img, sigma_d=1.0, sigma_i=1.5, k=0.04, version="ours"):
+    """ Calcule la fonction de Harris en chaque pixel de l'image img.
+    version="ours" : notre formule (gaussienne sigma_d, Sobel 3x3, fenêtre gaussienne sigma_i) ;
+    version="opencv" : même chose avec cv2.cornerHarris (fenêtre en boîte), plus rapide ; échelle différente (seuil relatif)."""
+    if version == "opencv":
+        return harris_opencv(img, sigma_d, sigma_i, k)
+    img = np.ascontiguousarray(img, dtype=np.float32) ## nécessaire pour utiliser les fonctions de cv2
     kd, ki = _ksize(sigma_d), _ksize(sigma_i)
-    g = cv2.GaussianBlur(img, (kd, kd), sigma_d, borderType=cv2.BORDER_REFLECT)
+    g = cv2.GaussianBlur(img, (kd, kd), sigma_d, borderType=cv2.BORDER_REFLECT) ## réduction du bruit avant calcul des dérivées
     Ix = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3, borderType=cv2.BORDER_REFLECT)
     Iy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3, borderType=cv2.BORDER_REFLECT)
     Sxx = cv2.GaussianBlur(Ix * Ix, (ki, ki), sigma_i, borderType=cv2.BORDER_REFLECT)    
@@ -18,6 +23,16 @@ def harris_function(img, sigma_d=1.0, sigma_i=1.5, k=0.04):
     Syy = cv2.GaussianBlur(Iy * Iy, (ki, ki), sigma_i, borderType=cv2.BORDER_REFLECT)
     trace=Sxx+Syy
     return Sxx*Syy-Sxy*Sxy-k*trace**2  
+
+def harris_opencv(img, sigma_d=1.0, sigma_i=1.5, k=0.04):
+    """Version OpenCV : lissage gaussien sigma_d, puis cv2.cornerHarris (Sobel 3x3, somme en boîte blockSize x blockSize).
+    blockSize = 2*ceil(1.5*sigma_i)+1 = 7 pour sigma_i = 1.5 (boîte de largeur proche de celle de la gaussienne de sigma_i)."""
+    img = np.ascontiguousarray(img, dtype=np.float32)
+    kd = _ksize(sigma_d)
+    g = cv2.GaussianBlur(img, (kd, kd), sigma_d, borderType=cv2.BORDER_REFLECT)
+    bs = 2 * int(np.ceil(1.5 * sigma_i)) + 1
+    return cv2.cornerHarris(g, bs, 3, k, borderType=cv2.BORDER_REFLECT)
+
 
 def detect_corners(R, rel_thresh=0.01, nms=5, max_n=500, border=6, grid_cells=(6,8)):
     M=float(R.max())

@@ -1,7 +1,7 @@
 """Perception pour les 12 caméras (6 paires stéréo, voir scene.STEREO_PAIRS).
 
 Chaque paire est traitée comme la paire frontale d'avant : coins de Harris dans l'image gauche ->
-appariement le long des lignes (match_along_rows) -> triangulation
+appariement le long des lignes (match_stereo, via match_along_rows) -> triangulation
 dans le repère de la caméra gauche puis passage en repère monde. Les points de toutes les paires
 s'intègrent ensuite dans la même VoxelMap avec VoxelMap.integrate_multi.
 """
@@ -11,8 +11,19 @@ import time
 import numpy as np
 
 from vision.corners import harris_function, detect_corners
-from vision.matching import match_along_rows, to_gray
+from vision.matching import match_stereo, to_gray
 from vision.triangulation import triangulate
+
+
+def match_along_rows(imgL, imgR, cL, min_zncc=0.8, ratio=0.8, grayL=None, grayR=None, norms=None):
+    """Adaptation de vision.matching.match_stereo (gris, [x_g,y,x_d,d,coût]) -> (ptsL, ptsR, scores),
+    identique à test14.match_along_rows."""
+    gL = grayL if grayL is not None else to_gray(imgL)
+    gR = grayR if grayR is not None else to_gray(imgR)
+    m = match_stereo(gL, gR, cL, max_cost=2.0 * (1.0 - min_zncc), ratio=ratio, norms=norms).astype(np.float64)
+    if len(m) == 0:
+        return np.empty((0, 2)), np.empty((0, 2)), np.empty(0)
+    return m[:, 0:2], np.column_stack([m[:, 2], m[:, 1]]), 1.0 - m[:, 4] / 2.0
 
 
 def perceive_pair(imgL, imgR, K, B, R, C, corner_kw=None, match_kw=None):

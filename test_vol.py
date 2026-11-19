@@ -93,7 +93,7 @@ def plan(vm, C, goal_w, args):
     t0 = time.perf_counter()
     blocked, cost_extra, j_min, libre, dist = classify(vm, args.ymin, args.ymax, args.rayon + args.marge,
                                                        k_unk=args.k_unk, k_prox=args.k_prox, d_secu=args.d_secu, details=True,
-                                                       r_v=args.rayon_v + args.marge)
+                                                       r_v=args.rayon_v + args.marge, d_unk=args.d_unk)
     t1 = time.perf_counter()
     nx, nj, nz = blocked.shape
 
@@ -258,6 +258,9 @@ def main():
     ap.add_argument("--k-unk", type=float, default=CLASSIFY_DEF["k_unk"], help="défaut : celui de classify")
     ap.add_argument("--k-prox", type=float, default=CLASSIFY_DEF["k_prox"], help="défaut : celui de classify")
     ap.add_argument("--d-secu", type=float, default=CLASSIFY_DEF["d_secu"], help="d_secu de classify (coût de proximité), défaut : celui de classify")
+    ap.add_argument("--d-unk", type=float, default=0.5, help="inconnu bloqué à moins de d_unk (m) d un obstacle (classify)")
+    ap.add_argument("--max-par-frame", type=int, default=1,
+                    help="nb max de mises à jour par voxel et par image, toutes paires confondues (VoxelMap)")
     ap.add_argument("--w", type=float, default=2.0)
     ap.add_argument("--save", default=None,
                     help="dossier de sortie (défaut : sorties_test_vol/<env> à côté de test_vol.py)")
@@ -283,6 +286,8 @@ def main():
     scene.building_mode = mode
     if mode == sim.ENV_FOREST:
         scene.forest_seed = args.seed
+    if mode == sim.ENV_CITY:
+        scene.city_seed = args.seed   # ville fixe, la graine tire départ et cible
     pos, yaw = scene.spawn(mode)
     if mode == sim.ENV_FOREST:
         scene.ensure_forest()
@@ -300,7 +305,7 @@ def main():
     print(f"\n=== test_vol : env={args.env} seed={args.seed}, {len(cams)} caméras ({len(cams) // 2} paires), "
           f"{args.W}x{args.H}, {args.img_par_s:g} img/s, v_max {follow_eff['v_max']:g} m/s, "
           f"caméras {'stabilisées' if args.cams_stab else 'fixées au châssis'}")
-    print("  follow : " + ", ".join(f"{k}={v:g}" for k, v in follow_eff.items()))
+    print("  follow : " + ", ".join(f"{k}={v:g}" if isinstance(v, (int, float)) else f"{k}={v}" for k, v in follow_eff.items()))
     print(f"  départ {np.round(p0, 1)}, cible {np.round(goal_w, 1)}, distance {np.linalg.norm(goal_w - p0):.1f} m")
 
     writer = top = chase_fbo = None
@@ -336,7 +341,8 @@ def main():
             t[0] = time.perf_counter() - t0
             res, t[1:4] = perceive_all(frame, corner_kw, match_kw)
             t0 = time.perf_counter()
-            vm.integrate_multi([r["P_w"] for r in res], [r["C"] for r in res], max_range=args.portee)
+            vm.integrate_multi([r["P_w"] for r in res], [r["C"] for r in res], max_range=args.portee,
+                               max_par_frame=args.max_par_frame)
             t[4] = time.perf_counter() - t0
             path_w, info = plan(vm, drone.position, goal_w, args)
             libre, dist_obs = info.get("libre"), info.get("dist")

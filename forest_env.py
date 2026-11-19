@@ -5,7 +5,7 @@
   branches supprimé, il reste le fût et les cartes d'aiguilles, qui commencent vers 22 %
   de la hauteur), répartis aléatoirement avec une distance minimale entre troncs.
 - Sol forestier procédural (terre et mousse), sans autre décor.
-- Collisions : cylindre vertical par tronc, deux cylindres pour le feuillage.
+- Collisions : cylindre vertical par tronc, tranches de cylindres pour le feuillage.
 - Départ en bordure sud, cible (coordonnée connue) en bordure nord.
 
 Tout est tiré à partir d'une graine. Les modèles et textures sont chargés une seule
@@ -20,6 +20,7 @@ import moderngl
 import numpy as np
 
 from collision import VerticalCylinder
+from realisme import inject_shadow
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PINE_DIR = os.path.join(HERE, "Assets", "models", "pine")
@@ -90,7 +91,7 @@ void main() {
         base *= 0.9 + 0.2 * noise(p * 20.0);
     }
     vec3 l = normalize(-u_light_dir);
-    float diff = max(dot(n, l), 0.0);
+    float diff = max(dot(n, l), 0.0) * shadow_factor(v_world, n, l);
     vec3 ambient = vec3(0.36, 0.38, 0.40) * (0.6 + 0.4 * n.y) + vec3(0.12);
     vec3 col = base * (ambient + vec3(0.70 * diff));
     float d = length(u_eye - v_world);
@@ -98,12 +99,20 @@ void main() {
     f_color = vec4(col, 1.0);
 }
 """
+FOREST_FRAGMENT_SHADER = inject_shadow(FOREST_FRAGMENT_SHADER)
 
 # Pin normalisé à une hauteur de 1 (voir tools/prepare_pine.py) : échelle = hauteur en mètres
 PINE_SCALE = (11.0, 14.0)        # hauteur des pins (m)
 PINE_TRUNK_RADIUS = 0.016        # rayon du fût vers 15 % de la hauteur (au-dessus de l'évasement)
 PINE_HEIGHT = 1.0
-PINE_FOLIAGE = [(0.22, 0.6, 0.115), (0.6, 1.0, 0.075)]  # (y min, y max, rayon) des cylindres de feuillage
+# (y min, y max, rayon) des tranches de feuillage, INTÉRIEURES au visible : 600 000 points échantillonnés sur
+# les triangles, gardés si la texture est opaque ; par tranche de 0,04 de hauteur, étendue maximale visible dans
+# chacun des 12 secteurs de 30° ; rayon = 0,9 x 10e percentile de ces étendues (valeur du secteur le plus
+# maigre, le plus petit des secteurs étant ignoré), puis min sur les tranches fusionnées. La collision ne
+# dépasse donc que très rarement les aiguilles vues, et de peu.
+PINE_FOLIAGE = [(0.26, 0.30, 0.11), (0.30, 0.38, 0.093), (0.38, 0.42, 0.085), (0.42, 0.50, 0.055),
+                (0.50, 0.58, 0.058), (0.58, 0.62, 0.068), (0.62, 0.70, 0.03), (0.70, 0.74, 0.03),
+                (0.74, 0.82, 0.028), (0.82, 0.90, 0.02), (0.90, 0.94, 0.015)]
 FOREST_DENSITY_DEFAULT = 0.07     # arbres par m²
 TREE_SPACING = 1.6               # demi-distance minimale entre deux troncs (m)
 
@@ -190,7 +199,7 @@ class ForestAssets:
 
 
 class ForestEnv:
-    def __init__(self, ctx, assets, seed=0, origin=(-80.0, 0.0, 0.0), size=50.0, tree_density=FOREST_DENSITY_DEFAULT):
+    def __init__(self, ctx, assets, seed=0, origin=(-80.0, 0.0, 0.0), size=80.0, tree_density=FOREST_DENSITY_DEFAULT):
         self.ctx = ctx
         self.assets = assets
         self.seed = int(seed)
@@ -225,7 +234,7 @@ class ForestEnv:
         h = self.size / 2.0
         ox, oz = self.origin[0], self.origin[2]
         spawn = np.array([0.0, h - 2.0])
-        self.target = self.origin + (rng.uniform(-h + 4.0, h - 4.0), 1.5, -h + 3.0)
+        self.target = self.origin + (rng.uniform(-h + 14.0, h - 14.0), 1.5, rng.uniform(-h + 14.0, -h + 26.0))  # ni au bord ni au centre
         target = np.array([self.target[0] - ox, self.target[2] - oz])
         occupied = []  # (x, z, rayon) en coordonnées locales
 
