@@ -17,6 +17,7 @@ assurant une détection de collision 100 % exacte et sans aucun polygone invisib
 
 import numpy as np
 from collision import Box
+from realisme import inject_shadow
 
 # ---------------------------------------------------------------------------
 # Identifiants de matériaux pour le shader procédural
@@ -173,7 +174,8 @@ void main() {
     vec3 v = normalize(u_eye - v_world);
     vec3 h = normalize(l + v);
 
-    float diff = max(dot(n, l), 0.0);
+    float sh = shadow_factor(v_world, n, l);
+    float diff = max(dot(n, l), 0.0) * sh;
     float spec = 0.0;
     vec3 base = vec3(0.55);
 
@@ -309,7 +311,7 @@ void main() {
     vec3 gnd_amb = vec3(0.24, 0.22, 0.20) * max(-n.y * 0.5 + 0.5, 0.0);
     vec3 ambient = sky_amb + gnd_amb + vec3(0.32); // base claire pour l'intérieur
 
-    vec3 color = base * (ambient + vec3(diff * 0.75)) + vec3(spec);
+    vec3 color = base * (ambient + vec3(diff * 0.75)) + vec3(spec * sh);
 
     // Atténuation atmosphérique avec la distance (fondue vers le ciel bleu-gris)
     float d = length(u_eye - v_world);
@@ -321,6 +323,7 @@ void main() {
     f_color = vec4(color, 1.0);
 }
 """
+BUILDING_FRAGMENT_SHADER = inject_shadow(BUILDING_FRAGMENT_SHADER)
 
 
 class OpeningInfo:

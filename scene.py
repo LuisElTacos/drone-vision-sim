@@ -38,6 +38,9 @@ from ui_panel import PANEL_WIDTH, SidePanel
 import mujoco_flight
 from mujoco_flight import MujocoFlight
 from walls_env import WallMaze
+from building import _building_program
+import realisme
+from realisme import Realisme, inject_shadow
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DRONE_MODEL = os.path.join(HERE, "Assets", "models", "DJI_Avata2_Sketchfab.glb")
@@ -54,6 +57,7 @@ WORLD_CAMERA_TARGET = (0.0, 3.0, -10.0)
 ENV_BUILDING, ENV_WALLS, ENV_EMPTY, ENV_FOREST, ENV_CITY = 0, 1, 2, 3, 4
 ENV_NAMES = {"batiment": ENV_BUILDING, "murs": ENV_WALLS, "vide": ENV_EMPTY, "foret": ENV_FOREST, "ville": ENV_CITY}
 BUILDING_SPAWN = ((-2.7, 1.4, 2.0), -90.0)
+LIGHT_DIR = (-0.4, -1.0, -0.3)   # direction du soleil (vers le bas)
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +274,8 @@ out vec4 f_color;
 void main() {
     vec3 n = normalize(v_normal);
     vec3 l = normalize(-u_light_dir);
-    float diff = max(dot(n, l), 0.0);
+    float sh = shadow_factor(v_world, n, l);
+    float diff = max(dot(n, l), 0.0) * sh;
     vec3 v = normalize(u_eye - v_world);
     float spec = pow(max(dot(reflect(-l, n), v), 0.0), 32.0) * 0.25;
     vec3 base = u_color;
@@ -282,13 +287,14 @@ void main() {
         float line = step(0.48, max(g.x, g.y));
         base = mix(base, vec3(0.15), line);
     }
-    vec3 c = base * (0.25 + 0.75 * diff) + vec3(spec);
+    vec3 c = base * (0.25 + 0.75 * diff) + vec3(spec * sh);
     // brouillard léger pour la profondeur
     float d = length(u_eye - v_world);
     c = mix(c, vec3(0.55, 0.7, 0.9), clamp((d - 45.0) / 100.0, 0.0, 1.0));
     f_color = vec4(c, 1.0);
 }
 """
+FRAGMENT_SHADER = inject_shadow(FRAGMENT_SHADER)
 
 
 class Scene:
@@ -329,6 +335,9 @@ class Scene:
 
         # Environnement actif : ENV_BUILDING, ENV_WALLS ou ENV_EMPTY
         self.building_mode = ENV_BUILDING
+
+        # Rendu réaliste optionnel (ombres, SSAO, effets caméra) : tout désactivé par défaut
+        self.fx = Realisme(ctx)
 
     @property
     def colliders(self):
@@ -457,25 +466,40 @@ class Scene:
         self.add_box((cx, (cy + hh + height) / 2.0, z), (hw, (height - cy - hh) / 2.0, t), color)
 
     def render(self, camera, aspect, extra=(), building_mode=0):
-        """Dessine la scène dans le viewport courant."""
+        """Dessine la scène dans le viewport courant (avec les options de rendu réaliste de self.fx)."""
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.building_mode = building_mode
+        fx = self.fx
+        for prog in (self.prog, _building_program(self.ctx),
+                     self.forest_assets.prog if self.forest_assets is not None else None,
+                     self.city_assets.prog if self.city_assets is not None else None):
+            fx.register(prog)
+        env = {ENV_BUILDING: self.procedural_building, ENV_WALLS: self.wall_maze,
+               ENV_FOREST: self.forest, ENV_CITY: self.city}.get(building_mode)
+        fx.prepare_shadows((building_mode, id(env)), camera, LIGHT_DIR,
+                           lambda cam: self._draw(cam, 1.0, ()))
+        is_drone_cam = isinstance(camera, Camera)
+        if fx.wants_post(camera, is_drone_cam):
+            fx.render_post(camera, is_drone_cam, aspect, lambda cam, a: self._draw(cam, a, extra))
+        else:
+            self._draw(camera, aspect, extra)
 
+    def _draw(self, camera, aspect, extra):
         # 1. Rendu du bâtiment procédural avec son shader architectural dédié
         if self.building_mode == ENV_BUILDING and self.procedural_building is not None:
-            self.procedural_building.render(camera, aspect, light_dir=(-0.4, -1.0, -0.3))
+            self.procedural_building.render(camera, aspect, light_dir=LIGHT_DIR)
         elif self.building_mode == ENV_WALLS:
-            self.wall_maze.render(camera, aspect, light_dir=(-0.4, -1.0, -0.3))
+            self.wall_maze.render(camera, aspect, light_dir=LIGHT_DIR)
         elif self.building_mode == ENV_FOREST and self.forest is not None:
-            self.forest.render(camera, aspect, light_dir=(-0.4, -1.0, -0.3))
+            self.forest.render(camera, aspect, light_dir=LIGHT_DIR)
         elif self.building_mode == ENV_CITY and self.city is not None:
-            self.city.render(camera, aspect, light_dir=(-0.4, -1.0, -0.3))
+            self.city.render(camera, aspect, light_dir=LIGHT_DIR)
 
         # 2. Rendu des objets standard (sol, sphère, drone)
         self.prog["u_proj"].write(camera.projection(aspect).T.copy().tobytes())
         self.prog["u_view"].write(camera.view().T.copy().tobytes())
-        self.prog["u_light_dir"].value = (-0.4, -1.0, -0.3)
-        self.prog["u_eye"].value = tuple(camera.position)
+        self.prog["u_light_dir"].value = LIGHT_DIR
+        self.prog["u_eye"].value = tuple(float(c) for c in camera.position)
 
         items_to_render = [*self.objects, *extra]
 
@@ -700,6 +724,8 @@ def main():
     parser = argparse.ArgumentParser(description="Simulation de drone stéréo")
     parser.add_argument("--env", choices=sorted(ENV_NAMES), default="murs", help="environnement de départ")
     parser.add_argument("--seed", type=int, default=0, help="graine des environnements « murs » et « foret »")
+    parser.add_argument("--realisme", default=None,
+                        help="rendu réaliste : liste parmi " + ",".join(realisme.OPTIONS) + ", ou « tout »")
     args = parser.parse_args()
     start_mode = ENV_NAMES[args.env]
 
@@ -719,6 +745,10 @@ def main():
     ctx = moderngl.create_context()
     scene = Scene(ctx, maze_seed=args.seed)
     scene.building_mode = start_mode
+    if args.realisme is not None:
+        on = realisme.parse_options(args.realisme)
+        for k in realisme.OPTIONS:
+            scene.fx.options[k] = k in on
     spawn_pos, spawn_yaw = scene.spawn(start_mode)
     drone = Drone(scene, position=spawn_pos, yaw=spawn_yaw)
     panel = SidePanel()
@@ -750,6 +780,7 @@ def main():
         "city_spawn": None,
         "city_info": [],
         "cams_on_chassis": drone.cams_on_chassis,  # False : caméras stabilisées
+        "fx": scene.fx,            # rendu réaliste (options et réglages modifiés par le panneau)
     }
     last_mode = start_mode
 
@@ -843,9 +874,12 @@ def main():
         return any(glfw.get_key(window, k) == glfw.PRESS for k in keys)
 
     last_t = glfw.get_time()
+    sim_t = 0.0
     while not glfw.window_should_close(window):
         t = glfw.get_time()
         dt, last_t = min(t - last_t, 0.1), t
+        sim_t += dt
+        scene.fx.time = sim_t   # intervalle entre images pour le flou de mouvement
         glfw.poll_events()
 
         # Détection de l'état de la manette
