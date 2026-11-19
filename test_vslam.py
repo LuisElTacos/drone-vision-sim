@@ -22,6 +22,7 @@ Sorties (dossier --save, par défaut sorties_test_vslam/<env>/ à côté du scri
     python test_vslam.py --env murs --duree 90
     python test_vslam.py --klt perso                     # ton KLT (vision/klt.py) au lieu du corrigé (klt_ref.py)
     python test_vslam.py --pose vraie                    # vol avec la pose vraie, VIO en observateur
+    python test_vslam.py --stereo coins                  # carte avec les coins seuls (avant la stéréo dense)
 """
 
 import argparse
@@ -54,8 +55,9 @@ from vision.matching import to_gray
 from vision.triangulation import triangulate
 from vision.voxels import VoxelMap
 from vision.vslam import FrontEnd, VIO
+from stereo_dense import disparite_sgbm, points_denses
 
-STEPS = ("capture", "coins", "VIO", "appariement", "triangulation", "voxels", "classify", "A*")
+STEPS = ("capture", "coins", "VIO", "appariement", "triangulation", "voxels", "classify", "A*", "dense")
 
 
 class TopViewVIO(TopViewAltitude):
@@ -77,8 +79,10 @@ class TopViewVIO(TopViewAltitude):
         return img, err
 
 
-def perceive_vio(frame, args, t, vio, use_true):
-    """Coins -> VIO -> appariement -> triangulation avec la pose VIO. Remplit t[1:5]."""
+def perceive_vio(frame, args, t, vio, use_true, vm=None):
+    """Coins -> VIO -> appariement -> triangulation avec la pose VIO. Remplit t[1:5].
+    --stereo sgbm / sgbm_demi : ajoute les points de la stéréo dense (jusqu'à --portee-dense, un par voxel) aux
+    points des coins pour la carte (t[8]) ; ptsL / Z restent ceux des coins (affichage)."""
     imgL, imgR = frame.images[0], frame.images[1]
     K = frame.K
     B = float(np.linalg.norm(frame.Cs[1] - frame.Cs[0]))
@@ -99,7 +103,15 @@ def perceive_vio(frame, args, t, vio, use_true):
     ptsL = ptsL[ok]
     disp = ptsL[:, 0] - ptsR[ok][:, 0]
     Z = K[0, 0] * B / np.maximum(disp, 1e-6)
-    return P_w[ok], C, ptsL, Z, len(cL)
+    P_w = P_w[ok]
+    if args.stereo != "coins" and vm is not None:
+        t0 = time.perf_counter()
+        D = disparite_sgbm(imgL, imgR, demi=args.stereo == "sgbm_demi")
+        Pd = points_denses(D, K, B, R, C, min(args.portee_dense, args.portee), vm.origin, vm.voxel_size,
+                           min_pts=args.min_pts_dense)
+        P_w = np.vstack([P_w, Pd]) if len(Pd) else P_w
+        t[8] = time.perf_counter() - t0
+    return P_w, C, ptsL, Z, len(cL)
 
 
 def make_klt(args):
@@ -305,6 +317,13 @@ def main():
     ap.add_argument("--grille", type=int, nargs=2, default=(12, 16))
     ap.add_argument("--zncc", type=float, default=0.8)
     ap.add_argument("--ratio", type=float, default=0.6)
+    ap.add_argument("--stereo", choices=("sgbm_demi", "sgbm", "coins"), default="sgbm_demi",
+                    help="points de la carte : coins + SGBM demi-résolution (défaut), coins + SGBM pleine résolution, "
+                         "ou coins seuls (version d'avant). La VIO utilise toujours les coins")
+    ap.add_argument("--portee-dense", type=float, default=8.0,
+                    help="portée max des points denses (m) ; au-delà seuls les coins comptent (le bruit SGBM épaissit les surfaces lointaines)")
+    ap.add_argument("--min-pts-dense", type=int, default=3,
+                    help="pixels denses min (1 sur 2 en x et y) par voxel et par image pour garder le voxel")
     ap.add_argument("--voxel", type=float, default=0.25)
     ap.add_argument("--max-par-frame", type=int, default=1)
     ap.add_argument("--portee", type=float, default=15.0)
@@ -312,7 +331,6 @@ def main():
     ap.add_argument("--ymin", type=float, default=0.6)
     ap.add_argument("--ymax", type=float, default=4.4)
     ap.add_argument("--rayon", type=float, default=0.14)
-    ap.add_argument("--rayon-v", type=float, default=0.035)
     ap.add_argument("--marge", type=float, default=0.3)
     ap.add_argument("--k-unk", type=float, default=CLASSIFY_DEF["k_unk"])
     ap.add_argument("--k-prox", type=float, default=8.0)
@@ -352,6 +370,8 @@ def main():
     use_true = args.pose == "vraie"
 
     dt_img, dt_vid, dt = 1.0 / args.img_par_s, 1.0 / args.fps, args.dt_phys
+    if abs(dt / sim.mujoco_flight.TIMESTEP - round(dt / sim.mujoco_flight.TIMESTEP)) > 1e-6 or dt < sim.mujoco_flight.TIMESTEP:
+        raise SystemExit(f"--dt-phys doit être un multiple de {sim.mujoco_flight.TIMESTEP * 1000:g} ms (pas MuJoCo), sinon l'IMU simulé est faux")
     if args.save is None:
         args.save = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sorties_test_vslam", args.env)
     os.makedirs(args.save, exist_ok=True)
@@ -383,7 +403,7 @@ def main():
     p_bcL = R_wb.T @ (np.array(cams[0].position, float) - p_b)
     p_bcR = R_wb.T @ (np.array(cams[1].position, float) - p_b)
     K = cams[0].intrinsics(args.W, args.H)
-    front = FrontEnd(K, n_max=args.n_points, min_dist=args.dist_min, klt=make_klt(args))
+    front = FrontEnd(K, n_max=args.n_points, min_dist=args.dist_min, klt=make_klt(args), ransac=not args.no_ransac)
     vio = VIO(K, R_bc, p_bcL, p_bcR, R_wb, p_b, drone.velocity, fenetre=args.fenetre,
               kf_parallaxe=args.kf_parallaxe, iters=args.vio_iters, front=front, schur=args.schur,
               sigma_g=max(args.gyro_bruit, 2e-3), sigma_a=max(args.acc_bruit, 2e-2))
@@ -405,6 +425,7 @@ def main():
           f"v_max {follow_eff['v_max']:g} m/s, pose {'VRAIE (VIO observatrice)' if use_true else 'VIO'}")
     print(f"  VIO : KLT {args.klt}, {args.n_points} points, fenêtre {args.fenetre} images clés, "
           f"IMU {1 / dt:g} Hz {f'bruit relatif {args.bruit_imu:g}' if args.bruit_imu else 'parfait' if not (args.gyro_bruit or args.acc_bruit) else f'bruit gyro {args.gyro_bruit:g} acc {args.acc_bruit:g}'}")
+    print(f"  carte : coins" + ("" if args.stereo == "coins" else f" + {args.stereo} jusqu'à {min(args.portee_dense, args.portee):g} m (min {args.min_pts_dense} px par voxel)"))
     print("  follow : " + ", ".join(f"{k}={v:g}" if isinstance(v, (int, float)) else f"{k}={v}" for k, v in follow_eff.items()))
     print(f"  départ {np.round(p0, 1)}, cible {np.round(goal_w, 1)}, distance {np.linalg.norm(goal_w - p0):.1f} m")
 
@@ -447,7 +468,7 @@ def main():
             del scene.target_items
             t[0] = time.perf_counter() - t0
             sup.preparer(frame, args)                 # caméras haut/bas : KLT + coins en tâche de fond pendant la VIO
-            P_w, C, ptsL, Z, n_coins = perceive_vio(frame, args, t, vio, use_true)
+            P_w, C, ptsL, Z, n_coins = perceive_vio(frame, args, t, vio, use_true, vm)
             pos_e, yaw_e = est_pose()
             res_sup = sup.perceive(frame, args, vio, use_true, t)   # caméras haut/bas : attente de preparer dans t[3], triangulation dans t[4]
             t0 = time.perf_counter()
@@ -585,7 +606,7 @@ def main():
         print(f"  engagement {args.engagement:g} : chemin précédent gardé sur {n_garde}/{len(times)} images ; "
               f"abandons : {memo_plan.get('raisons', {})}")
     if np.isfinite(min_clear):
-        print(f"  distance minimale bord du drone (rayon {args.rayon} m) - tronc : {100 * min_clear:.0f} cm")
+        print(f"  distance minimale bord du drone (rayon {args.rayon} m) - arbre (tronc + aiguilles) : {100 * min_clear:.0f} cm")
 
     # --- bilan VIO --------------------------------------------------------------
     V = np.array([[float(x) for x in r[1:11]] for r in vio_rows])     # t, p vraie (3), p est (3), lacets, err_p

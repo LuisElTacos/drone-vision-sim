@@ -351,7 +351,7 @@ def main():
     print(f"  distance parcourue {np.sum(np.linalg.norm(np.diff(traj, axis=0), axis=1)):.1f} m, "
           f"distance finale à la cible {np.linalg.norm(goal_w - traj[-1]):.1f} m")
     if np.isfinite(min_clear):
-        print(f"  distance minimale drone - tronc (vérité terrain) : {100 * min_clear:.0f} cm "
+        print(f"  distance minimale drone - arbre, tronc + aiguilles (vérité terrain) : {100 * min_clear:.0f} cm "
               f"({'COLLISION' if min_clear < 0.0 else 'ok'})")
     print(f"\n  Temps par image (ms), image 0 exclue :   médiane   moyenne       max")
     for i, name in enumerate(STEPS):

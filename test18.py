@@ -19,6 +19,7 @@ import time
 
 import glfw
 import numpy as np
+from collision import VerticalCylinder
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Circle
@@ -88,13 +89,21 @@ def advance_along(path_w, pos, dist):
 
 
 def clearance_trees(scene, pos):
-    """Distance horizontale du drone au bord du tronc le plus proche (m), vérité terrain."""
+    """Distance horizontale du drone au bord de l'arbre le plus proche (m), vérité terrain : cylindres de
+    collision (tronc + tranches d'aiguilles PINE_FOLIAGE) qui couvrent l'altitude du drone."""
     forest = scene.forest
-    if forest is None or not forest.obstacles:
+    if forest is None or not forest.colliders:
         return np.inf
-    c = np.array([[o["center"][0], o["center"][2]] for o in forest.obstacles])
-    r = np.array([o["radius"] for o in forest.obstacles])
-    return float((np.hypot(c[:, 0] - pos[0], c[:, 1] - pos[2]) - r).min())
+    cache = getattr(forest, "_clearance_cyl", None)
+    if cache is None:
+        cyl = [c for c in forest.colliders if isinstance(c, VerticalCylinder)]
+        cache = forest._clearance_cyl = (np.array([c.center_xz for c in cyl]), np.array([c.radius for c in cyl]),
+                                         np.array([c.y_min for c in cyl]), np.array([c.y_max for c in cyl]))
+    c, r, y0, y1 = cache
+    m = (y0 <= pos[1]) & (pos[1] <= y1)
+    if not m.any():
+        return np.inf
+    return float((np.hypot(c[m, 0] - pos[0], c[m, 1] - pos[2]) - r[m]).min())
 
 
 def main():
@@ -199,7 +208,7 @@ def main():
     print(f"  distance parcourue {np.sum(np.linalg.norm(np.diff(traj, axis=0), axis=1)):.1f} m, "
           f"distance finale à la cible {np.linalg.norm(goal_w - traj[-1]):.1f} m")
     if np.isfinite(min_clear):
-        print(f"  distance minimale drone - tronc (vérité terrain) : {100 * min_clear:.0f} cm "
+        print(f"  distance minimale drone - arbre, tronc + aiguilles (vérité terrain) : {100 * min_clear:.0f} cm "
               f"({'COLLISION' if min_clear < 0.0 else 'ok'})")
     print(f"  A* : médiane {1000 * np.median([p['t_astar'] for p in plans]):.0f} ms, "
           f"max {1000 * max(p['t_astar'] for p in plans):.0f} ms")

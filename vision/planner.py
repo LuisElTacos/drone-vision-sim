@@ -2,6 +2,35 @@ import numpy as np
 import heapq as h
 import math
 from scipy.ndimage import distance_transform_edt
+from numba import njit, prange
+
+@njit(cache=True, parallel=True)
+def _classify_nb(L, dist, so, sf, r_total, k_unk, k_prox, d_secu, xi0, xi1, zi0, zi1):
+    """blocked, cost_extra, libre de classify_fenetre en une passe (mêmes calculs en float32 que numpy)."""
+    nx, ny, nz = L.shape
+    blocked = np.empty(L.shape, np.bool_)
+    cost = np.empty(L.shape, np.float32)
+    libre = np.empty(L.shape, np.bool_)
+    msf = -sf
+    one = np.float32(1.0)
+    zero = np.float32(0.0)
+    for x in prange(nx):
+        inx = xi0 <= x < xi1
+        for y in range(ny):
+            for z in range(nz):
+                v = L[x, y, z]
+                d = dist[x, y, z]
+                occ = v > so
+                blocked[x, y, z] = occ or d < r_total
+                c = k_unk if ((not occ) and v >= msf) else zero
+                if inx and zi0 <= z < zi1:
+                    p = (d_secu - d) / d_secu
+                    p = min(max(p, zero), one)
+                    c = c + k_prox * (p * p)
+                cost[x, y, z] = c
+                libre[x, y, z] = v < msf
+    return blocked, cost, libre
+
 
 def classify_fenetre(vmap, pos, y_min, y_max, r_total, rayon=8.0, k_unk=0.35, k_prox=3.0,
                      seuil_occ=0.0, seuil_free=0.0, d_secu=0.8, details=False):
@@ -10,9 +39,6 @@ def classify_fenetre(vmap, pos, y_min, y_max, r_total, rayon=8.0, k_unk=0.35, k_
     j_max = min(vmap.shape[1] - 1, int(np.floor((y_max - vmap.origin[1]) / vs)))
     L = vmap.map[:, j_min:j_max + 1, :]
     nx, _, nz = L.shape
-
-    occ = L > seuil_occ
-    unknown = (~occ) & (L >= -seuil_free)
 
     # fenêtre horizontale autour du drone (indices x et z), plus une marge pour ne pas perdre
     # les obstacles juste hors fenêtre dans le calcul des distances
@@ -26,7 +52,7 @@ def classify_fenetre(vmap, pos, y_min, y_max, r_total, rayon=8.0, k_unk=0.35, k_
     z0, z1 = max(0, zi0 - pad), min(nz, zi1 + pad)
 
     # distances : seulement dans la fenêtre de calcul
-    occ_w = occ[x0:x1, :, z0:z1]
+    occ_w = L[x0:x1, :, z0:z1] > seuil_occ
     if occ_w.any():
         dist_w = distance_transform_edt(~occ_w) * vs
     else:
@@ -36,15 +62,15 @@ def classify_fenetre(vmap, pos, y_min, y_max, r_total, rayon=8.0, k_unk=0.35, k_
     dist = np.full(L.shape, np.inf, np.float32)             # hors fenêtre : distance inconnue = infinie
     dist[xi0:xi1, :, zi0:zi1] = dist_w[sx, :, sz]
 
-    # sorties : hors fenêtre, obstacles non gonflés et pas de coût de proximité
-    blocked = occ | (dist < r_total)
-    cost_extra = (k_unk * unknown).astype(np.float32)
-    prox_w = np.clip((d_secu - dist[xi0:xi1, :, zi0:zi1]) / d_secu, 0, 1) ** 2
-    cost_extra[xi0:xi1, :, zi0:zi1] += (k_prox * prox_w).astype(np.float32)
+    # occupé : L > seuil_occ ; inconnu : ni occupé ni libre (L >= -seuil_free) ; hors fenêtre : obstacles
+    # non gonflés et pas de coût de proximité
+    f32 = np.float32
+    blocked, cost_extra, libre = _classify_nb(np.ascontiguousarray(L), dist, f32(seuil_occ), f32(seuil_free), f32(r_total),
+                                              f32(k_unk), f32(k_prox), f32(d_secu), xi0, xi1, zi0, zi1)
     if details:
-        libre = L < -seuil_free
         return blocked, cost_extra, j_min, libre, dist
     return blocked, cost_extra, j_min
+
 
 def classify(vmap, y_min, y_max, r_total, k_unk=0.35, k_prox=3.0, seuil_occ=0.0, seuil_free=0.0, d_secu=0.8, details=False):    
     vs = vmap.voxel_size

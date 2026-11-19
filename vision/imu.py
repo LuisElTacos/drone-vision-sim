@@ -170,11 +170,6 @@ def right_jacobian(w):
     """Jacobienne à droite de SO(3), (3,) -> (3, 3)."""
     w = np.asarray(w, float)
     return right_jacobian3(np.ascontiguousarray(w))
-    th = np.linalg.norm(w)
-    K = skew(w)
-    if th < 1e-6:
-        return np.eye(3) - 0.5 * K
-    return np.eye(3) - (1 - np.cos(th)) / th ** 2 * K + (th - np.sin(th)) / th ** 3 * (K @ K)
 
 
 def orthonormalize(R):
@@ -274,23 +269,6 @@ class Preintegration:
         c = np.ascontiguousarray
         return residual_nb(c(self.dR), c(self.dv), c(self.dp), T, G_W, c(Ri, dtype=float), c(pi, dtype=float), c(vi, dtype=float),
                                c(Rj, dtype=float), c(pj, dtype=float), c(vj, dtype=float))
-        dv_w = vj - vi - G_W * T
-        dp_w = pj - pi - vi * T - 0.5 * G_W * T ** 2
-        rR = so3_log(self.dR.T @ Ri.T @ Rj)
-        rv = Ri.T @ dv_w - self.dv
-        rp = Ri.T @ dp_w - self.dp
-        Jr_inv = np.eye(3) + 0.5 * skew(rR)
-        Ji, Jj = np.zeros((9, 9)), np.zeros((9, 9))
-        Ji[0:3, 0:3] = -Jr_inv @ Rj.T @ Ri
-        Jj[0:3, 0:3] = Jr_inv
-        Ji[3:6, 0:3] = skew(Ri.T @ dv_w)
-        Ji[3:6, 6:9] = -Ri.T
-        Jj[3:6, 6:9] = Ri.T
-        Ji[6:9, 0:3] = skew(Ri.T @ dp_w)
-        Ji[6:9, 3:6] = -Ri.T
-        Ji[6:9, 6:9] = -Ri.T * T
-        Jj[6:9, 3:6] = Ri.T
-        return np.concatenate([rR, rv, rp]), Ji, Jj
 
     def sqrt_info(self):
         """W tel que ||W r||² = r^T Cov^-1 r (mis en cache tant qu'aucun échantillon n'est ajouté)."""
