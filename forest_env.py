@@ -20,6 +20,7 @@ import moderngl
 import numpy as np
 
 from collision import VerticalCylinder
+from realisme import inject_shadow
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PINE_DIR = os.path.join(HERE, "Assets", "models", "pine")
@@ -90,7 +91,7 @@ void main() {
         base *= 0.9 + 0.2 * noise(p * 20.0);
     }
     vec3 l = normalize(-u_light_dir);
-    float diff = max(dot(n, l), 0.0);
+    float diff = max(dot(n, l), 0.0) * shadow_factor(v_world, n, l);
     vec3 ambient = vec3(0.36, 0.38, 0.40) * (0.6 + 0.4 * n.y) + vec3(0.12);
     vec3 col = base * (ambient + vec3(0.70 * diff));
     float d = length(u_eye - v_world);
@@ -98,6 +99,7 @@ void main() {
     f_color = vec4(col, 1.0);
 }
 """
+FOREST_FRAGMENT_SHADER = inject_shadow(FOREST_FRAGMENT_SHADER)
 
 # Pin normalisé à une hauteur de 1 (voir tools/prepare_pine.py) : échelle = hauteur en mètres
 PINE_SCALE = (11.0, 14.0)        # hauteur des pins (m)

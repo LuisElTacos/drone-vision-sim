@@ -104,6 +104,30 @@ class SidePanel:
             _, settings["cams_on_chassis"] = imgui.checkbox(
                 "Fixées au châssis", settings.get("cams_on_chassis", True))
 
+            fx = settings.get("fx")
+            if fx is not None:
+                imgui.spacing()
+                imgui.separator()
+                if imgui.collapsing_header("Rendu réaliste"):
+                    o, p = fx.options, fx.params
+                    for key, label in (("ombres", "Ombres portées"), ("ssao", "Occlusion ambiante (SSAO)")):
+                        _, o[key] = imgui.checkbox(label, o[key])
+                    imgui.text_colored(imgui.ImVec4(0.7, 0.7, 0.7, 1.0), "Caméras du drone :")
+                    for key, label in (("bruit", "Bruit capteur"), ("flou", "Flou de mouvement"),
+                                       ("expo", "Exposition auto"), ("distorsion", "Distorsion (barillet)"),
+                                       ("jpeg", "Compression JPEG")):
+                        _, o[key] = imgui.checkbox(label, o[key])
+                    for key, label, lo, hi, fmt in (
+                            ("pose_ms", "Temps de pose", 1.0, 30.0, "%.1f ms"),
+                            ("bruit_niveau", "Niveau de bruit", 0.0, 5.0, "x%.1f"),
+                            ("k1", "Distorsion k1", -0.4, 0.2, "%.2f"),
+                            ("ssao_intensite", "Intensité SSAO", 0.0, 2.0, "%.1f")):
+                        imgui.set_next_item_width(-1)
+                        _, p[key] = imgui.slider_float("##fx_" + key, float(p[key]), lo, hi, label + " " + fmt)
+                    imgui.set_next_item_width(-1)
+                    _, p["jpeg_qualite"] = imgui.slider_int("##fx_jpeg", int(p["jpeg_qualite"]), 5, 100,
+                                                            "Qualité JPEG %d")
+
             imgui.spacing()
             imgui.separator()
             imgui.text("Contrôles")

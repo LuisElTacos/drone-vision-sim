@@ -28,6 +28,7 @@ import moderngl
 import numpy as np
 
 from collision import Box
+from realisme import inject_shadow
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CITY_DIR = os.path.join(HERE, "Assets", "ville")
@@ -88,7 +89,7 @@ void main() {
     if (u_alpha_mask && c.a < 0.5) discard;
     vec3 base = c.rgb * u_color;
     vec3 l = normalize(-u_light_dir);
-    float diff = max(dot(n, l), 0.0);
+    float diff = max(dot(n, l), 0.0) * shadow_factor(v_world, n, l);
     vec3 ambient = vec3(0.36, 0.38, 0.40) * (0.6 + 0.4 * n.y) + vec3(0.12);
     vec3 col = base * (ambient + vec3(0.70 * diff));
     float d = length(u_eye - v_world);
@@ -96,6 +97,7 @@ void main() {
     f_color = vec4(col, 1.0);
 }
 """
+CITY_FRAGMENT_SHADER = inject_shadow(CITY_FRAGMENT_SHADER)
 
 
 # --- lecture du GLB -------------------------------------------------------------
