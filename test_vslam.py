@@ -22,6 +22,7 @@ Sorties (dossier --save, par défaut sorties_test_vslam/<env>/ à côté du scri
     python test_vslam.py --env murs --duree 90
     python test_vslam.py --klt perso                     # ton KLT (vision/klt.py) au lieu du corrigé (klt_ref.py)
     python test_vslam.py --pose vraie                    # vol avec la pose vraie, VIO en observateur
+    python test_vslam.py --stereo coins                  # carte avec les coins seuls (avant la stéréo dense)
 """
 
 import argparse
@@ -53,8 +54,9 @@ from vision.matching import to_gray
 from vision.triangulation import triangulate
 from vision.voxels import VoxelMap
 from vision.vslam import FrontEnd, VIO
+from stereo_dense import disparite_sgbm, points_denses
 
-STEPS = ("capture", "coins", "VIO", "appariement", "triangulation", "voxels", "classify", "A*")
+STEPS = ("capture", "coins", "VIO", "appariement", "triangulation", "voxels", "classify", "A*", "dense")
 
 
 class TopViewVIO(TopViewAltitude):
@@ -76,8 +78,10 @@ class TopViewVIO(TopViewAltitude):
         return img, err
 
 
-def perceive_vio(frame, args, t, vio, use_true):
-    """Coins -> VIO -> appariement -> triangulation avec la pose VIO. Remplit t[1:5]."""
+def perceive_vio(frame, args, t, vio, use_true, vm=None):
+    """Coins -> VIO -> appariement -> triangulation avec la pose VIO. Remplit t[1:5].
+    --stereo sgbm / sgbm_demi : ajoute les points de la stéréo dense (jusqu'à --portee-dense, un par voxel) aux
+    points des coins pour la carte (t[8]) ; ptsL / Z restent ceux des coins (affichage)."""
     imgL, imgR = frame.images[0], frame.images[1]
     K = frame.K
     B = float(np.linalg.norm(frame.Cs[1] - frame.Cs[0]))
@@ -98,7 +102,15 @@ def perceive_vio(frame, args, t, vio, use_true):
     ptsL = ptsL[ok]
     disp = ptsL[:, 0] - ptsR[ok][:, 0]
     Z = K[0, 0] * B / np.maximum(disp, 1e-6)
-    return P_w[ok], C, ptsL, Z, len(cL)
+    P_w = P_w[ok]
+    if args.stereo != "coins" and vm is not None:
+        t0 = time.perf_counter()
+        D = disparite_sgbm(imgL, imgR, demi=args.stereo == "sgbm_demi")
+        Pd = points_denses(D, K, B, R, C, min(args.portee_dense, args.portee), vm.origin, vm.voxel_size,
+                           min_pts=args.min_pts_dense)
+        P_w = np.vstack([P_w, Pd]) if len(Pd) else P_w
+        t[8] = time.perf_counter() - t0
+    return P_w, C, ptsL, Z, len(cL)
 
 
 def make_klt(args):
@@ -214,6 +226,13 @@ def main():
     ap.add_argument("--grille", type=int, nargs=2, default=(12, 16))
     ap.add_argument("--zncc", type=float, default=0.8)
     ap.add_argument("--ratio", type=float, default=0.6)
+    ap.add_argument("--stereo", choices=("sgbm_demi", "sgbm", "coins"), default="sgbm_demi",
+                    help="points de la carte : coins + SGBM demi-résolution (défaut), coins + SGBM pleine résolution, "
+                         "ou coins seuls (version d'avant). La VIO utilise toujours les coins")
+    ap.add_argument("--portee-dense", type=float, default=8.0,
+                    help="portée max des points denses (m) ; au-delà seuls les coins comptent (le bruit SGBM épaissit les surfaces lointaines)")
+    ap.add_argument("--min-pts-dense", type=int, default=3,
+                    help="pixels denses min (1 sur 2 en x et y) par voxel et par image pour garder le voxel")
     ap.add_argument("--voxel", type=float, default=0.25)
     ap.add_argument("--max-par-frame", type=int, default=1)
     ap.add_argument("--portee", type=float, default=15.0)
@@ -303,6 +322,7 @@ def main():
           f"v_max {follow_eff['v_max']:g} m/s, pose {'VRAIE (VIO observatrice)' if use_true else 'VIO'}")
     print(f"  VIO : KLT {args.klt}, {args.n_points} points, fenêtre {args.fenetre} images clés, "
           f"IMU {1 / dt:g} Hz {f'bruit relatif {args.bruit_imu:g}' if args.bruit_imu else 'parfait' if not (args.gyro_bruit or args.acc_bruit) else f'bruit gyro {args.gyro_bruit:g} acc {args.acc_bruit:g}'}")
+    print(f"  carte : coins" + ("" if args.stereo == "coins" else f" + {args.stereo} jusqu'à {min(args.portee_dense, args.portee):g} m (min {args.min_pts_dense} px par voxel)"))
     print("  follow : " + ", ".join(f"{k}={v:g}" if isinstance(v, (int, float)) else f"{k}={v}" for k, v in follow_eff.items()))
     print(f"  départ {np.round(p0, 1)}, cible {np.round(goal_w, 1)}, distance {np.linalg.norm(goal_w - p0):.1f} m")
 
@@ -343,7 +363,7 @@ def main():
             frame = cap.grab(cams, mode, t_sim)
             del scene.target_items
             t[0] = time.perf_counter() - t0
-            P_w, C, ptsL, Z, n_coins = perceive_vio(frame, args, t, vio, use_true)
+            P_w, C, ptsL, Z, n_coins = perceive_vio(frame, args, t, vio, use_true, vm)
             pos_e, yaw_e = est_pose()
             t0 = time.perf_counter()
             vm.integrate(P_w, C, max_range=args.portee, max_par_frame=args.max_par_frame)
