@@ -725,7 +725,7 @@ def main():
     parser.add_argument("--env", choices=sorted(ENV_NAMES), default="murs", help="environnement de départ")
     parser.add_argument("--seed", type=int, default=0, help="graine des environnements « murs » et « foret »")
     parser.add_argument("--realisme", default=None,
-                        help="rendu réaliste : liste parmi " + ",".join(realisme.OPTIONS) + ", ou « tout »")
+                        help="rendu réaliste : liste parmi " + ",".join(realisme.OPTIONS) + ", ou « tout », « aucun » (défaut : tout sauf distorsion)")
     args = parser.parse_args()
     start_mode = ENV_NAMES[args.env]
 
