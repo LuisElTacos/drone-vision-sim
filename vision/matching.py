@@ -209,7 +209,9 @@ def match_stereo(left: np.ndarray, right: np.ndarray, corners_l: np.ndarray,d_mi
     y_coords = np.round(corners_l[:, 1]).astype(np.int64)
     xg_f_all = np.ascontiguousarray(corners_l[:, 0], dtype=np.float64)
 
-    out, keep = _match_corners(left, right, norm_l, norm_r, xg_f_all, y_coords, d_min, d_max, half, ratio, max_cost, cross_check)
+    # images en float64 pour le noyau : le patch est déjà en float64, mêmes produits sans conversion à chaque pixel
+    out, keep = _match_corners(left.astype(np.float64), right.astype(np.float64), norm_l, norm_r, xg_f_all, y_coords,
+                               d_min, d_max, half, ratio, max_cost, cross_check)
 
     ordre = np.argsort(y_coords, kind="stable")
     ordre = ordre[keep[ordre]]

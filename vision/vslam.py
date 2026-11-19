@@ -325,17 +325,20 @@ class FrontEnd:
         d_max=160,
         harris_seuil=1e-5,
         grille=(6, 8),
+        ransac=True,
     ):
         self.K, self.Kinv = K, np.linalg.inv(K)
         self.n_max, self.min_dist = n_max, min_dist
         self.klt = klt or KLT()
         self.zncc, self.ratio, self.d_max = zncc, ratio, d_max
         self.harris_seuil, self.grille = harris_seuil, grille
+        self.ransac = ransac
         self.prev_pyr = None
         self.pts = np.empty((0, 2))
         self.ids = np.empty(0, np.int64)
         self.next_id = 0
         self.norms = None
+        self.n_prev = self.n_klt = 0
 
     def predict(self, R_cc):
         """B1. Prédiction des points dans l'image t par l'homographie de rotation H = K R_cc K^-1
@@ -353,9 +356,11 @@ class FrontEnd:
         les ok. Met à jour self.pts et self.ids (garder seulement les survivants)."""
         pred = self.predict(R_cc)
         p1, ok = self.klt.track_fb(self.prev_pyr, pyr, self.pts, pred)
-        i = np.nonzero(ok)[0]
-        bons = fundamental_ransac(self.pts[i], p1[i])
-        ok[i[~bons]] = False
+        self.n_prev, self.n_klt = len(self.pts), int(ok.sum())
+        if self.ransac:
+            i = np.nonzero(ok)[0]
+            bons = fundamental_ransac(self.pts[i], p1[i])
+            ok[i[~bons]] = False
         self.pts = p1[ok]
         self.ids = self.ids[ok]
 
@@ -405,8 +410,8 @@ class FrontEnd:
             yc = np.round(self.pts[:, 1]).astype(np.int64)
             self.norms = (_window_norms(L, half), _window_norms(R, half), half)
             out, keep = _match_corners(
-                L,
-                R,
+                L.astype(np.float64),
+                R.astype(np.float64),
                 self.norms[0],
                 self.norms[1],
                 np.ascontiguousarray(self.pts[:, 0], np.float64),
@@ -658,6 +663,7 @@ class VIO:
         if creux:
             pf, pl, lptr, pidx = _paires(F, Li, nF, nL)
             Hplp = np.zeros((0, 6, 3))
+        cost_prev = cost
         for _ in range(self.iters):
             # --- linéarisation ---
             Hpp = np.zeros((npo, npo))
@@ -740,8 +746,9 @@ class VIO:
                     improved = True
                     break
                 lam *= 10
-            if not improved or cost0 - cost < 1e-6 * cost0:
+            if not improved or cost_prev - cost < 1e-3 * cost_prev:
                 break
+            cost_prev = cost
         for i, f in enumerate(self.frames):
             f.R, f.p, f.v = orthonormalize(Rs[i]), ps[i], vs[i]
         for k, l in enumerate(act):
@@ -796,6 +803,7 @@ class VIO:
         R_cc = None
         if self.frames:
             R_cc = self.R_bc.T @ self.pre.dR.T @ self.R_bc  # caméra t-1 -> t
+        self.front.n_prev = self.front.n_klt = 0
         ids, uvL, uvR = self.front.process(grayL, grayR, R_cc, harris)
         t1 = time.perf_counter()
 
@@ -830,4 +838,7 @@ class VIO:
         last = self.frames[-1]
         self.R, self.p, self.v = last.R, last.p, last.v
         t2 = time.perf_counter()
+        self.stats = dict(t_front=t1 - t0, t_back=t2 - t1, suivis=len(ids), total=len(ids),
+                          stereo=int(np.isfinite(uvR[:, 0]).sum()), points3d=len(self.lm), obs=n_obs, klt=self.front.n_klt, prev=self.front.n_prev,
+                          images=len(self.frames), cle=int(fr.kf))
         return self.R, self.p

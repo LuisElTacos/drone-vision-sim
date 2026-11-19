@@ -121,7 +121,6 @@ def main():
     ap.add_argument("--ymin", type=float, default=0.6)
     ap.add_argument("--ymax", type=float, default=4.4, help="altitude max de vol (m), plafond de la mission")
     ap.add_argument("--rayon", type=float, default=0.14, help="rayon horizontal du drone (m), englobe le châssis à tout lacet")
-    ap.add_argument("--rayon-v", type=float, default=0.035, help="demi-hauteur du drone (m) ; gonflement cylindrique")
     ap.add_argument("--marge", type=float, default=0.3, help="marge dure autour du drone (m) ; l éloignement vient du coût d_secu de classify")
     ap.add_argument("--k-unk", type=float, default=CLASSIFY_DEF["k_unk"], help="défaut : celui de classify")
     ap.add_argument("--k-prox", type=float, default=8.0)
@@ -313,7 +312,7 @@ def main():
           f"distance finale à la cible {np.linalg.norm(goal_w - traj[-1]):.1f} m")
     print(f"  contacts avec un obstacle : {n_contacts}")
     if np.isfinite(min_clear):
-        print(f"  distance minimale bord du drone (rayon {args.rayon} m) - tronc : {100 * min_clear:.0f} cm")
+        print(f"  distance minimale bord du drone (rayon {args.rayon} m) - arbre (tronc + aiguilles) : {100 * min_clear:.0f} cm")
     print(f"  temps de calcul par image : médiane {1000 * np.median(tot):.0f} ms, max {1000 * tot.max():.0f} ms "
           f"(budget {1000 * dt_img:.0f} ms)")
     # --- récap des temps : pipeline vision (temps.csv) + hors vision, par image traitée ---

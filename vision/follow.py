@@ -84,7 +84,7 @@ def follow(path_w, libre, dist, pos, yaw_deg, goal_w, v_max=4.5, lookahead=1.3, 
     v_prox = v_max - a_lat * (v_max - v_prox)                  # poids : interpolation entre v_max et v_prox
     v = min(v_max, max(v_sur, v_min), v_prox)
     if a_lat_max > 0:                                           # option : v <= sqrt(a_lat_max / courbure max) sur les ~3 m suivants
-        v = min(v, max(v_min, math.sqrt(a_lat_max / max(_kappa_max(path_w[i:], 3.0, lisse=courbure_lisse), 1e-6))))
+        v = min(v, max(v_min, math.sqrt(a_lat_max / max(_kappa_max_cache(path_w, i, 3.0, courbure_lisse), 1e-6))))
 
     # 4. lacet
     dvec = target - pos
@@ -141,6 +141,24 @@ def distance_libre(grid, p0, u, portee):
     return float(s[touche[0]]) if len(touche) else portee
 
 
+_KAPPA_CACHE = [None, None, {}]     # (chemin, paramètres, {i: courbure}) : le chemin ne change qu'à chaque image
+
+
+def _kappa_max_cache(path_w, i, horizon, lisse):
+    """_kappa_max(path_w[i:], horizon, lisse=lisse), mémorisé tant que path_w est le même objet."""
+    c = _KAPPA_CACHE
+    if c[0] is not path_w or c[1] != (horizon, lisse):
+        c[0], c[1], c[2] = path_w, (horizon, lisse), {}
+    k = c[2].get(i)
+    if k is None:
+        k = c[2][i] = _kappa_max(path_w[i:], horizon, lisse=lisse)
+    return k
+
+
+def _norm_rows(v):
+    return np.sqrt(v[:, 0] * v[:, 0] + v[:, 1] * v[:, 1] + v[:, 2] * v[:, 2])
+
+
 def _kappa_max(pts, horizon, pas=0.75, lisse=False):
     """Courbure max (1/m) du chemin sur `horizon` m : cercle par 3 points espacés de `pas` m le long du chemin (3D)."""
     if lisse and len(pts) > 5:                       # moyenne glissante sur ~1 m (5 points de 0.25 m), extrémités gardées
@@ -150,11 +168,13 @@ def _kappa_max(pts, horizon, pas=0.75, lisse=False):
     s = np.concatenate(([0.0], np.cumsum(seg)))
     if s[-1] < 2 * pas:
         return 0.0
-    kmax = 0.0
-    for s0 in np.arange(0.0, min(horizon, s[-1] - 2 * pas) + 1e-9, pas / 2):
-        P = [np.array([np.interp(si, s, pts[:, d]) for d in range(3)]) for si in (s0, s0 + pas, s0 + 2 * pas)]
-        a, b, c = np.linalg.norm(P[1] - P[0]), np.linalg.norm(P[2] - P[1]), np.linalg.norm(P[2] - P[0])
-        area2 = np.linalg.norm(np.cross(P[1] - P[0], P[2] - P[0]))   # 2 * aire
-        if a * b * c > 1e-9:
-            kmax = max(kmax, 2.0 * area2 / (a * b * c))
-    return kmax
+    s0 = np.arange(0.0, min(horizon, s[-1] - 2 * pas) + 1e-9, pas / 2)
+    P0, P1, P2 = (np.stack([np.interp(si, s, pts[:, d]) for d in range(3)], axis=1) for si in (s0, s0 + pas, s0 + 2 * pas))
+    u, w = P1 - P0, P2 - P0
+    cr = np.stack([u[:, 1] * w[:, 2] - u[:, 2] * w[:, 1], u[:, 2] * w[:, 0] - u[:, 0] * w[:, 2],
+                   u[:, 0] * w[:, 1] - u[:, 1] * w[:, 0]], axis=1)
+    abc = _norm_rows(u) * _norm_rows(P2 - P1) * _norm_rows(w)
+    ok = abc > 1e-9
+    if not ok.any():
+        return 0.0
+    return max(0.0, float((2.0 * _norm_rows(cr)[ok] / abc[ok]).max()))

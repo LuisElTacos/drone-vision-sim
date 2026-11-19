@@ -221,7 +221,6 @@ def main():
     ap.add_argument("--ymin", type=float, default=0.6)
     ap.add_argument("--ymax", type=float, default=4.4)
     ap.add_argument("--rayon", type=float, default=0.14)
-    ap.add_argument("--rayon-v", type=float, default=0.035)
     ap.add_argument("--marge", type=float, default=0.3)
     ap.add_argument("--k-unk", type=float, default=CLASSIFY_DEF["k_unk"])
     ap.add_argument("--k-prox", type=float, default=8.0)
@@ -251,6 +250,8 @@ def main():
     use_true = args.pose == "vraie"
 
     dt_img, dt_vid, dt = 1.0 / args.img_par_s, 1.0 / args.fps, args.dt_phys
+    if abs(dt / sim.mujoco_flight.TIMESTEP - round(dt / sim.mujoco_flight.TIMESTEP)) > 1e-6 or dt < sim.mujoco_flight.TIMESTEP:
+        raise SystemExit(f"--dt-phys doit être un multiple de {sim.mujoco_flight.TIMESTEP * 1000:g} ms (pas MuJoCo), sinon l'IMU simulé est faux")
     if args.save is None:
         args.save = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sorties_test_vslam", args.env)
     os.makedirs(args.save, exist_ok=True)
@@ -281,7 +282,7 @@ def main():
     p_bcL = R_wb.T @ (np.array(cams[0].position, float) - p_b)
     p_bcR = R_wb.T @ (np.array(cams[1].position, float) - p_b)
     K = cams[0].intrinsics(args.W, args.H)
-    front = FrontEnd(K, n_max=args.n_points, min_dist=args.dist_min, klt=make_klt(args))
+    front = FrontEnd(K, n_max=args.n_points, min_dist=args.dist_min, klt=make_klt(args), ransac=not args.no_ransac)
     vio = VIO(K, R_bc, p_bcL, p_bcR, R_wb, p_b, drone.velocity, fenetre=args.fenetre,
               kf_parallaxe=args.kf_parallaxe, iters=args.vio_iters, front=front, schur=args.schur,
               sigma_g=max(args.gyro_bruit, 2e-3), sigma_a=max(args.acc_bruit, 2e-2))
@@ -471,7 +472,7 @@ def main():
     print(f"  distance parcourue {dist_parc:.1f} m, distance finale (vraie) à la cible {np.linalg.norm(goal_w - traj[-1]):.1f} m")
     print(f"  contacts avec un obstacle : {n_contacts}")
     if np.isfinite(min_clear):
-        print(f"  distance minimale bord du drone (rayon {args.rayon} m) - tronc : {100 * min_clear:.0f} cm")
+        print(f"  distance minimale bord du drone (rayon {args.rayon} m) - arbre (tronc + aiguilles) : {100 * min_clear:.0f} cm")
 
     # --- bilan VIO --------------------------------------------------------------
     V = np.array([[float(x) for x in r[1:11]] for r in vio_rows])     # t, p vraie (3), p est (3), lacets, err_p

@@ -134,9 +134,10 @@ class Camera:
         return perspective(self.fovy, aspect, self.near, 500.0)
 
     def intrinsics(self, width, height):
-        """Matrice K (convention vision) pour une image width x height."""
+        """Matrice K (convention vision) pour une image width x height, pixels indicés depuis 0.
+        Le centre du pixel (i, j) est en (i + 0.5, j + 0.5) pour OpenGL : l'axe optique tombe en ((W-1)/2, (H-1)/2)."""
         f = (height / 2.0) / math.tan(math.radians(self.fovy) / 2.0)
-        return np.array([[f, 0, width / 2.0], [0, f, height / 2.0], [0, 0, 1]])
+        return np.array([[f, 0, (width - 1) / 2.0], [0, f, (height - 1) / 2.0], [0, 0, 1]])
 
 
 class ChaseCamera:
@@ -331,16 +332,25 @@ class Scene:
 
     @property
     def colliders(self):
-        """Collisionneurs dynamiques selon le modèle de bâtiment actif."""
+        """Collisionneurs dynamiques selon le modèle de bâtiment actif.
+        La liste est mise en cache tant que l'environnement et ses collisionneurs ne changent pas :
+        MujocoFlight.sync_scene la reconnaît alors par identité, sans comparer ses éléments."""
+        env = None
         if self.building_mode == ENV_BUILDING and self.procedural_building is not None:
-            return [*self.base_colliders, *self.procedural_building.colliders]
-        if self.building_mode == ENV_WALLS:
-            return [*self.base_colliders, *self.wall_maze.colliders]
-        if self.building_mode == ENV_FOREST and self.forest is not None:
-            return [*self.base_colliders, *self.forest.colliders]
-        if self.building_mode == ENV_CITY and self.city is not None:
-            return [*self.base_colliders, *self.city.colliders]
-        return self.base_colliders
+            env = self.procedural_building
+        elif self.building_mode == ENV_WALLS:
+            env = self.wall_maze
+        elif self.building_mode == ENV_FOREST and self.forest is not None:
+            env = self.forest
+        elif self.building_mode == ENV_CITY and self.city is not None:
+            env = self.city
+        if env is None:
+            return self.base_colliders
+        key = (env, len(self.base_colliders), len(env.colliders))
+        cache = getattr(self, "_colliders_cache", None)
+        if cache is None or cache[0][0] is not key[0] or cache[0][1:] != key[1:]:
+            self._colliders_cache = cache = (key, [*self.base_colliders, *env.colliders])
+        return cache[1]
 
     def ensure_forest(self):
         if self.forest is None:
