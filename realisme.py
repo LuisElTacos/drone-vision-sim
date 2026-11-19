@@ -1,6 +1,7 @@
 """Rendu « réaliste » optionnel : ombres portées, occlusion ambiante (SSAO) et effets de caméra.
 
-Tout est désactivé par défaut : Scene.render donne alors exactement l'image habituelle.
+Par défaut toutes les options sont actives sauf la distorsion (DEFAUT), qui casserait l'hypothèse de paires
+rectifiées de la vision. REALISME=aucun (ou --realisme aucun) redonne exactement l'image habituelle.
 
 Options (Realisme.options, cochables dans le panneau, ou --realisme / variable REALISME) :
   ombres      ombres portées du soleil (shadow mapping, carte de profondeur vue du soleil)
@@ -30,6 +31,7 @@ import moderngl
 import numpy as np
 
 OPTIONS = ("ombres", "ssao", "bruit", "flou", "expo", "distorsion", "jpeg")
+DEFAUT = ("ombres", "ssao", "bruit", "flou", "expo", "jpeg")   # options actives sans REALISME
 CAMERA_FX = ("bruit", "flou", "expo", "distorsion", "jpeg")
 SKY = (0.55, 0.7, 0.9)
 SHADOW_UNIT = 7            # unité de texture réservée à la carte d'ombre
@@ -391,6 +393,8 @@ def parse_options(text):
         return set()
     if text in ("tout", "all", "1"):
         return set(OPTIONS)
+    if text in ("defaut", "défaut"):
+        return set(DEFAUT)
     out = {t.strip() for t in text.split(",") if t.strip()}
     bad = out - set(OPTIONS)
     if bad:
@@ -401,9 +405,9 @@ def parse_options(text):
 class Realisme:
     def __init__(self, ctx):
         self.ctx = ctx
-        self.options = {k: False for k in OPTIONS}
-        for k in parse_options(os.environ.get("REALISME", "")):
-            self.options[k] = True
+        env = os.environ.get("REALISME")
+        on = set(DEFAUT) if env is None else parse_options(env)
+        self.options = {k: k in on for k in OPTIONS}
         self.params = {
             "ombre_intensite": 0.85,  # part de la lumière directe retirée à l'ombre
             "ombre_portee": 40.0,     # demi-côté de la zone couverte par la carte d'ombre (m)

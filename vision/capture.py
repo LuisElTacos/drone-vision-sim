@@ -32,6 +32,9 @@ class StereoCapture:
             self.depths.append(depth)
             
     def grab(self, cams, b_mode,t):
+        fx = getattr(self.scene, "fx", None)
+        if fx is not None:
+            fx.time = t   # temps de simulation : intervalle entre images pour le flou de mouvement
         images = []
         depths = []
         Rs = []
