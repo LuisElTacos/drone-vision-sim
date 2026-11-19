@@ -43,6 +43,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DRONE_MODEL = os.path.join(HERE, "Assets", "models", "DJI_Avata2_Sketchfab.glb")
 
 STEREO_BASELINE = 0.18     # distance entre les deux caméras (m)
+CAMERAS_VERT = 60.0        # inclinaison (degrés) des caméras avant haute et basse (centrées)
 CAMERA_FOVY = 60.0         # champ vertical des caméras du drone (degrés)
 CAMERA_SETBACK = 0.03      # retrait des caméras derrière la face avant du drone (m)
 SPLIT = "side_by_side"     # vues en colonnes ("side_by_side") ou en lignes ("stacked")
@@ -495,8 +496,11 @@ class Drone:
     ou stabilisées (lacet seul).
     """
 
-    def __init__(self, scene, position, yaw=-90.0):
+    def __init__(self, scene, position, yaw=-90.0, pitchs_sup=(CAMERAS_VERT, -CAMERAS_VERT)):
+        """pitchs_sup : inclinaisons (degrés, > 0 vers le haut) de caméras supplémentaires seules,
+        centrées à l'avant ; caméra 2 + k pour pitchs_sup[k] (par défaut : 2 = haut, 3 = bas)."""
         self.scene = scene
+        self.pitchs_sup = tuple(float(a) for a in pitchs_sup)
         self.position = np.array(position, dtype="f8")
         self.velocity = np.zeros(3, dtype="f8")   # vitesse en repère monde (m/s)
         self.yaw = float(yaw)                     # lacet (degrés)
@@ -515,7 +519,7 @@ class Drone:
             for v, i, color, tex_img in parts
         ]
 
-        self.cameras = [Camera(position, fovy=CAMERA_FOVY, near=0.02) for _ in range(2)]
+        self.cameras = [Camera(position, fovy=CAMERA_FOVY, near=0.02) for _ in range(2 + len(self.pitchs_sup))]
         self.cams_on_chassis = True   # False : caméras stabilisées (lacet seul)
         self.flight = MujocoFlight(self.half, scene.colliders, self.position, self.yaw)
         self.flight_pos = self.position.copy()   # dernière position donnée par MuJoCo (détecte les téléportations)
@@ -556,14 +560,23 @@ class Drone:
             right = -left
         else:
             fwd, right, up = self.forward, self.right, np.array([0.0, 1.0, 0.0])
+        front = self.position + fwd * (self.half[2] - CAMERA_SETBACK)
+        # paire frontale (rectifiée, baseline horizontale)
         p = math.radians(self.camera_pitch)
         cam_fwd = math.cos(p) * fwd + math.sin(p) * up
         cam_up = -math.sin(p) * fwd + math.cos(p) * up
-        front = self.position + fwd * (self.half[2] - CAMERA_SETBACK)
-        for cam, side in zip(self.cameras, (-0.5, 0.5)):  # gauche, droite
+        for cam, side in zip(self.cameras[:2], (-0.5, 0.5)):  # gauche, droite
             cam.position = (front + right * side * STEREO_BASELINE).astype("f4")
             cam.rotation = np.column_stack([right, cam_up, cam_fwd])
             cam.yaw, cam.pitch = self.yaw, self.camera_pitch
+        # caméras supplémentaires : une seule, centrée à l'avant, inclinée de pitchs_sup[k] (haut > 0, bas < 0)
+        for cam, extra in zip(self.cameras[2:], getattr(self, "pitchs_sup", ())):
+            p = math.radians(self.camera_pitch + extra)
+            cam_fwd = math.cos(p) * fwd + math.sin(p) * up
+            cam_up = -math.sin(p) * fwd + math.cos(p) * up
+            cam.position = front.astype("f4")
+            cam.rotation = np.column_stack([right, cam_up, cam_fwd])
+            cam.yaw, cam.pitch = self.yaw, self.camera_pitch + extra
 
     def update(self, dt, cmd_velocity=None, cmd_yaw_rate=0.0):
         """Avance la simulation de dt secondes.
@@ -748,6 +761,8 @@ def main():
     views = [
         ["Caméra 1 (gauche)", True, drone.cameras[0]],
         ["Caméra 2 (droite)", True, drone.cameras[1]],
+        ["Caméra 3 (haut)", False, drone.cameras[2]],
+        ["Caméra 4 (bas)", False, drone.cameras[3]],
         ["Caméra fixe (monde)", True, world_cam],
         ["Caméra de suivi", False, ChaseCamera(drone)],
     ]
@@ -811,7 +826,7 @@ def main():
             else:
                 glfw.set_window_should_close(win, True)
         if key == glfw.KEY_TAB and action == glfw.PRESS:
-            views[3][1] = not views[3][1]
+            views[-1][1] = not views[-1][1]
 
     def on_cursor(win, x, y):
         panel.mouse_pos(x, y)

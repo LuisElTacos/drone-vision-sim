@@ -45,6 +45,7 @@ from vision.planner import classify, classify_fenetre, astar
 from test_full import PANEL_W, PANEL_H, TOP_W, TOP_H, camera_panel, put_lines
 from test_vol import TopViewAltitude, FOLLOW_DEF, CLASSIFY_DEF
 from vision.capture import StereoCapture
+from vision.cams_sup import PairesSup
 from vision.corners import harris_function, detect_corners
 from vision.follow import follow
 from vision.imu import SimIMU, so3_log
@@ -106,9 +107,71 @@ def make_klt(args):
         return klt_perso.KLTCV(max_res=args.klt_res)
     return klt_perso.KLT(max_res=args.klt_res)      # ref / perso : notre KLT (vision/klt.py)
 
-def plan(vm, C, goal_w, args):
+def cout_chemin(path, cost_extra, vs, cost_vert=None):
+    """Coût A* d'une suite de voxels voisins (mêmes arcs que astar : longueur x (1 + cost_extra) [+ longueur x cost_vert si vertical])."""
+    P = np.asarray(path)
+    if len(P) < 2:
+        return 0.0
+    d = np.diff(P, axis=0)
+    L = vs * np.sqrt((d ** 2).sum(axis=1))
+    ii = tuple(P[1:].T)
+    c = L * (1.0 + cost_extra[ii])
+    if cost_vert is not None:
+        c = c + np.where(d[:, 1] != 0, L * cost_vert[ii], 0.0)
+    return float(c.sum())
+
+
+def chemin_precedent(memo, s, j_min, blocked, cost_extra, vs, cost_vert, d_max=1.0, L=None, occ_sur=None, r_win=np.inf, r_proche=0.0):
+    """Reste du chemin précédent, à partir de son voxel le plus proche du départ s (grille courante).
+    Renvoie ((chemin, coût), None) ou (None, raison) : absent, hors grille, écart (> d_max m) ou bloqué sur la carte actuelle.
+    occ_sur (avec L = carte vm.map restreinte à la grille) : le chemin n'est abandonné que si un voxel du chemin ou un voisin
+    (3x3x3) a L > occ_sur (obstacle sûr), au lieu de « bloqué » (marge de sécurité et seuil_occ). Ce test ne porte que sur
+    la partie du chemin à moins de r_win m du départ : hors de la fenêtre de classify_fenetre, les obstacles ne sont pas
+    gonflés et l'A* frôle les murs, ce test y abandonnerait tous les chemins. À moins de r_proche m du départ, le test
+    « bloqué » reste appliqué (sécurité : le chemin ne doit pas entrer dans la marge d'un obstacle proche)."""
+    prev = memo.get("chemin")
+    if prev is None:
+        return None, "absent"
+    P = prev.copy()
+    P[:, 1] -= j_min
+    if (P < 0).any() or (P >= np.array(blocked.shape)).any():
+        return None, "hors grille"
+    d = np.linalg.norm(P - np.array(s), axis=1)
+    k = int(np.argmin(d))
+    if vs * d[k] > d_max:
+        return None, "écart"
+    P = P[k:]
+    if occ_sur is None:
+        if blocked[tuple(P[1:].T)].any():
+            return None, "bloqué"
+    else:
+        Q = P[1:]
+        dq = vs * np.linalg.norm(Q - np.array(s), axis=1)
+        if blocked[tuple(Q[dq < r_proche].T)].any():
+            return None, "bloqué proche"
+        # voisinage 3x3x3 seulement pour les voxels qui étaient dans la fenêtre (obstacles gonflés) quand le chemin a été
+        # planifié (memo["centre"]) : au-delà, l'A* frôlait les murs, on n'y teste que le voxel lui-même.
+        c = memo.get("centre")
+        dc = vs * np.linalg.norm(Q - (c - np.array([0, j_min, 0])), axis=1) if c is not None else np.zeros(len(Q))
+        if (L[tuple(Q.T)] > occ_sur).any():
+            return None, "obstacle sûr"
+        Q = Q[(dq < r_win) & (dc < r_win)]
+        for o in np.stack(np.meshgrid([-1, 0, 1], [-1, 0, 1], [-1, 0, 1], indexing="ij"), -1).reshape(-1, 3):
+            R = np.clip(Q + o, 0, np.array(L.shape) - 1)
+            if (L[tuple(R.T)] > occ_sur).any():
+                return None, "obstacle sûr (marge)"
+    # raccord s -> P[0] en ligne droite (au plus d_max) : longueur x (1 + cost_extra[P[0]])
+    c0 = vs * d[k] * (1.0 + float(cost_extra[tuple(P[0])]))
+    P = np.vstack([np.array(s)[None], P]) if d[k] > 0 else P
+    return (P, c0 + cout_chemin(P[1:], cost_extra, vs, cost_vert)), None
+
+
+def plan(vm, C, goal_w, args, memo=None):
     """Copie de test18.plan, avec classify_fenetre (distances calculées dans une fenêtre de rayon
-    --rayon-fenetre autour de la position estimée C). --rayon-fenetre 0 : fenêtre = toute la carte."""
+    --rayon-fenetre autour de la position estimée C). --rayon-fenetre 0 : fenêtre = toute la carte.
+
+    --engagement e > 0 (hystérésis contre les zigzags) : on garde le reste du chemin précédent (memo) tant qu'il
+    n'est pas bloqué, sauf si le nouveau chemin A* coûte moins de (1 - e) x son coût recalculé sur la carte actuelle."""
     t0 = time.perf_counter()
     seuils = {k: getattr(args, k) for k in ("d_secu", "seuil_free", "seuil_occ") if getattr(args, k, None) is not None}
     if args.classify_classique:
@@ -133,13 +196,39 @@ def plan(vm, C, goal_w, args):
     nb = (slice(max(s[0] - 1, 0), s[0] + 2), slice(max(s[1] - 1, 0), s[1] + 2), slice(max(s[2] - 1, 0), s[2] + 2))
     blocked[nb] &= (dist[nb] == 0)
     blocked[g] = False
-    path = astar(blocked, cost_extra, s, g, vm.voxel_size, w=args.w)
+    cost_vert = None
+    if args.k_unk_v is not None:   # inconnu au-dessus / en dessous : arcs verticaux vers l'inconnu plus chers (inf = interdits)
+        Lc = vm.map[:, j_min:j_min + nj, :]
+        inconnu = (Lc <= args.seuil_occ) & (Lc >= -args.seuil_free)
+        cost_vert = np.where(inconnu, args.k_unk_v, 0.0)
+    path = astar(blocked, cost_extra, s, g, vm.voxel_size, w=args.w, cost_vert=cost_vert)
+    garde, raison = False, None
+    if memo is not None and args.engagement > 0:
+        old, raison = chemin_precedent(memo, s, j_min, blocked, cost_extra, vm.voxel_size, cost_vert,
+                                       d_max=args.engagement_dmax, L=vm.map[:, j_min:j_min + nj, :], occ_sur=args.abandon_occ,
+                                       r_win=rayon_f - vm.voxel_size if not args.classify_classique else np.inf,
+                                       r_proche=args.abandon_proche)
+        if old is not None:
+            c_new = cout_chemin(path, cost_extra, vm.voxel_size, cost_vert) if path is not None else np.inf
+            if c_new >= (1.0 - args.engagement) * old[1]:
+                path, garde = [tuple(int(v) for v in r) for r in old[0]], True
+            else:
+                raison = "moins cher"
+        memo.setdefault("raisons", {})
+        if raison is not None:
+            memo["raisons"][raison] = memo["raisons"].get(raison, 0) + 1
     t2 = time.perf_counter()
     info = dict(t_classify=t1 - t0, t_astar=t2 - t1, n_blocked=int(blocked.sum()), start=s, goal=g,
-                shape=blocked.shape, grid=grid_follow)
+                shape=blocked.shape, grid=grid_follow, garde=garde, raison=raison)
     if path is None:
+        if memo is not None:
+            memo["chemin"] = None
         return None, info
     idx = np.array(path)
+    if memo is not None:
+        memo["chemin"] = idx + np.array([0, j_min, 0])
+        if not garde:
+            memo["centre"] = np.array(s) + np.array([0, j_min, 0])   # départ (et centre de fenêtre) du chemin planifié
     ii = tuple(idx.T)
     info["libre"] = libre[ii]
     info["dist"] = dist[ii]
@@ -184,6 +273,8 @@ def main():
     ap.add_argument("--vio-iters", type=int, default=5, help="itérations de Levenberg-Marquardt par image")
     ap.add_argument("--schur", choices=("dense", "creux"), default="creux",
                     help="complément de Schur du back-end VIO : dense (version d'origine) ou creux (numba, par couple image-point)")
+    ap.add_argument("--cams-vert", type=float, default=60.0,
+                    help="ajoute 2 caméras seules à l avant, inclinées de +/- cet angle (degrés, haut et bas), pour la carte seulement ; 0 = paire frontale seule")
     ap.add_argument("--normes", choices=("recalcul", "partage"), default="partage",
                     help="normes de fenêtres ZNCC : recalculées par l'appariement, ou reprises de la stéréo du front-end VIO")
     ap.add_argument("--no-ransac", action="store_true", help="pas de RANSAC (matrice fondamentale) dans le suivi")
@@ -231,6 +322,16 @@ def main():
     ap.add_argument("--seuil-occ", type=float, default=1.2,
                     help="L > seuil_occ = occupé ; 1.2 avec val_occ 0.85 : 2 impacts (2 images) pour dire occupé")
     ap.add_argument("--w", type=float, default=2.0)
+    ap.add_argument("--k-unk-v", type=float, default=None,
+                    help="coût en plus (par m) des montées/descentes vers un voxel inconnu ; inf = interdit ; défaut : aucun")
+    ap.add_argument("--engagement", type=float, default=0.0,
+                    help="hystérésis du chemin : garde le chemin précédent sauf si le nouveau coûte moins de (1 - e) fois ; 0 = replanifie librement")
+    ap.add_argument("--engagement-dmax", type=float, default=1.0, help="écart max (m) au chemin précédent pour le garder")
+    ap.add_argument("--abandon-occ", type=float, default=None,
+                    help="avec --engagement : n'abandonne le chemin précédent que si un voxel du chemin (ou voisin) a L > cette valeur "
+                         "(obstacle sûr, ex. 3.0) ; défaut : dès qu'il traverse un voxel bloqué")
+    ap.add_argument("--abandon-proche", type=float, default=1.5,
+                    help="avec --abandon-occ : à moins de cette distance (m) du drone, le chemin est abandonné dès qu'il est bloqué")
     ap.add_argument("--rayon-fenetre", type=float, default=8.0,
                     help="rayon (m) de la fenêtre autour du drone où classify calcule les distances ; 0 = toute la carte")
     ap.add_argument("--classify-classique", action="store_true",
@@ -267,10 +368,11 @@ def main():
     if mode == sim.ENV_FOREST:
         scene.ensure_forest()
     goal_w = np.array(scene.target(), float)
-    drone = sim.Drone(scene, position=np.array(pos, float), yaw=float(yaw))
+    drone = sim.Drone(scene, position=np.array(pos, float), yaw=float(yaw),
+                      pitchs_sup=(args.cams_vert, -args.cams_vert) if args.cams_vert else ())
     drone.cams_on_chassis = True              # la VIO suppose des caméras solidaires de l'IMU
     drone.update_cameras()
-    cams = drone.cameras[:2]
+    cams = drone.cameras                      # paire frontale (VIO + carte) puis paires sup (carte)
     cap = StereoCapture(ctx, scene, cams, W=args.W, H=args.H)
 
     # --- extrinsèques caméra/corps (calibration) et initialisation de la VIO sur la pose vraie ---
@@ -285,6 +387,7 @@ def main():
     vio = VIO(K, R_bc, p_bcL, p_bcR, R_wb, p_b, drone.velocity, fenetre=args.fenetre,
               kf_parallaxe=args.kf_parallaxe, iters=args.vio_iters, front=front, schur=args.schur,
               sigma_g=max(args.gyro_bruit, 2e-3), sigma_a=max(args.acc_bruit, 2e-2))
+    sup = PairesSup(drone, cams)
     imu = SimIMU(drone, gyro_noise=args.gyro_bruit, acc_noise=args.acc_bruit, seed=args.seed, rel_noise=args.bruit_imu)
 
     def est_pose():
@@ -324,6 +427,7 @@ def main():
     n_contacts, in_contact, min_clear = 0, False, np.inf
     t_immobile = 0.0
     t_no_path = None
+    memo_plan, n_garde = {}, 0
     cmd_v, cmd_yaw = np.zeros(3), 0.0
     status = "durée max atteinte"
     next_img, next_vid, t_sim, it = 0.0, 0.0, 0.0, 0
@@ -342,14 +446,19 @@ def main():
             frame = cap.grab(cams, mode, t_sim)
             del scene.target_items
             t[0] = time.perf_counter() - t0
+            sup.preparer(frame, args)                 # caméras haut/bas : KLT + coins en tâche de fond pendant la VIO
             P_w, C, ptsL, Z, n_coins = perceive_vio(frame, args, t, vio, use_true)
             pos_e, yaw_e = est_pose()
+            res_sup = sup.perceive(frame, args, vio, use_true, t)   # caméras haut/bas : attente de preparer dans t[3], triangulation dans t[4]
             t0 = time.perf_counter()
+            for P_s, C_s, _ in res_sup:
+                vm.integrate(P_s, C_s, max_range=args.portee, max_par_frame=args.max_par_frame)
             vm.integrate(P_w, C, max_range=args.portee, max_par_frame=args.max_par_frame)
             t[5] = time.perf_counter() - t0
-            path_w, info = plan(vm, pos_e, goal_w, args)
+            path_w, info = plan(vm, pos_e, goal_w, args, memo_plan)
             libre, dist_obs, grid_f = info.get("libre"), info.get("dist"), info.get("grid")
             t[6], t[7] = info["t_classify"], info["t_astar"]
+            n_garde += int(info.get("garde", False))
             times.append(t)
             extra.append(acc)
             acc = dict(follow=0.0, phys=0.0, video=0.0)
@@ -373,6 +482,8 @@ def main():
                   f"(VIO {1000 * t[2]:3.0f})  v {np.linalg.norm(drone.velocity):4.2f} m/s  cible {d_goal:5.1f} m  "
                   f"VIO : klt {st.get('klt', 0):3d}/{st.get('prev', 0):3d} suivis {st.get('suivis', 0):3d} 3D {st.get('points3d', 0):3d}{' clé' if st.get('cle') else '    '} "
                   f"err {100 * err_p:5.1f} cm {err_yaw:+5.2f}°  contacts {n_contacts}"
+                  + (f"  sup {'/'.join(str(r[2]) for r in res_sup)}" if res_sup else "")
+                  + ("  garde" if info.get("garde") else f"  change ({info['raison']})" if info.get("raison") not in (None, "absent") else "")
                   + ("" if path_w is not None else "  PAS DE CHEMIN"))
             if writer is not None:
                 camp = camera_panel(frame.images[0], ptsL, Z, args.portee)
@@ -470,6 +581,9 @@ def main():
     print(f"\n  Bilan : {status} à t = {t_sim:.1f} s simulées ({len(times)} images traitées)")
     print(f"  distance parcourue {dist_parc:.1f} m, distance finale (vraie) à la cible {np.linalg.norm(goal_w - traj[-1]):.1f} m")
     print(f"  contacts avec un obstacle : {n_contacts}")
+    if args.engagement > 0:
+        print(f"  engagement {args.engagement:g} : chemin précédent gardé sur {n_garde}/{len(times)} images ; "
+              f"abandons : {memo_plan.get('raisons', {})}")
     if np.isfinite(min_clear):
         print(f"  distance minimale bord du drone (rayon {args.rayon} m) - tronc : {100 * min_clear:.0f} cm")
 

@@ -9,7 +9,7 @@ import numpy as np
 from vision.corners import harris_function, detect_corners
 from vision.klt import KLT
 from vision.matching import _match_corners, _window_norms
-from vision.imu import Preintegration, so3_exp, skew, orthonormalize
+from vision.imu import Preintegration, so3_exp, skew, orthonormalize, residual_nb, G_W as _G_W
 from scipy.optimize import least_squares
 from numba import njit
 
@@ -82,6 +82,37 @@ def _linearize_nb(Rs, F, Li, r, Pb, Pc, Z, valid, R_bc, f, sig, huber, nF, nL):
             gp6[fi] += Jx.T @ wr
             Hpl6[fi, :, l, :] += w * (Jx.T @ A)
     return Hll, gl, Hpp6, gp6, Hpl6
+
+
+# ---- termes IMU en un seul appel numba (imu="numba") : mêmes produits que la boucle Python de _optimize/_cost ----
+@njit(cache=True)
+def _imu_normal_nb(dRs, dvs, dps, Ts, Ws, Rs, ps, vs, G, Hpp, gp):
+    """Ajoute à Hpp, gp les blocs IMU des paires (i-1, i), i = 1..nF-1 (dRs[i] etc. : préintégration de l'image i)."""
+    nF = Rs.shape[0]
+    for i in range(1, nF):
+        ri, Ji, Jj = residual_nb(dRs[i], dvs[i], dps[i], Ts[i], G, Rs[i - 1], ps[i - 1], vs[i - 1], Rs[i], ps[i], vs[i])
+        W = Ws[i]
+        ri, Ji, Jj = W @ ri, W @ Ji, W @ Jj
+        sj = 9 * (i - 1)
+        JjT = np.ascontiguousarray(Jj.T)
+        Hpp[sj:sj + 9, sj:sj + 9] += JjT @ Jj
+        gp[sj:sj + 9] += JjT @ ri
+        if i >= 2:
+            si = 9 * (i - 2)
+            JiT = np.ascontiguousarray(Ji.T)
+            Hpp[si:si + 9, si:si + 9] += JiT @ Ji
+            Hpp[si:si + 9, sj:sj + 9] += JiT @ Jj
+            Hpp[sj:sj + 9, si:si + 9] += JjT @ Ji
+            gp[si:si + 9] += JiT @ ri
+
+
+@njit(cache=True)
+def _imu_cost_nb(dRs, dvs, dps, Ts, Ws, Rs, ps, vs, G):
+    c = 0.0
+    for i in range(1, Rs.shape[0]):
+        ri, _, _ = residual_nb(dRs[i], dvs[i], dps[i], Ts[i], G, Rs[i - 1], ps[i - 1], vs[i - 1], Rs[i], ps[i], vs[i])
+        c += 0.5 * np.sum((Ws[i] @ ri) ** 2)
+    return c
 
 
 # ---- variante creuse du complément de Schur (schur="creux") -----------------------------------------------
@@ -469,10 +500,12 @@ class VIO:
         front=None,
         schur="creux",
         obs="numpy",
+        imu="numba",
     ):
         # schur : "dense" (version d'origine, Hpl dense (9(nF-1), nL, 3)) ou "creux" (un bloc 6x3 par couple
         # (image, point) observé, complément de Schur en numba ; mêmes équations, arrondis flottants près)
         self.schur = schur
+        self.imu_mode = imu  # "python" (boucles d'origine) ou "numba" (termes IMU en un appel)
         self.obs = obs  # "python" (version d'origine de _observations) ou "numpy" (vectorisée, mêmes sorties)
         self.K, self.R_bc = K, R_bc
         self.p_bc = np.stack([p_bcL, p_bcR])
@@ -621,6 +654,19 @@ class VIO:
         UV = np.where(C[:, None] == 1, uvR[r2], uvL[r2])
         return act_arr.tolist(), fidx[r2].astype(int), k[r2].astype(int), C, UV.astype(float)
 
+    def _imu_pack(self):
+        """Préintégrations de la fenêtre empilées (indice 0 = image sans préintégration, non utilisé)."""
+        n = len(self.frames)
+        key = tuple(id(f.preint) for f in self.frames) + tuple(len(f.preint.samples) for f in self.frames[1:])
+        if getattr(self, "_pack", None) is not None and self._pack[0] == key:
+            return self._pack[1]
+        dRs = np.zeros((n, 3, 3)); dvs = np.zeros((n, 3)); dps = np.zeros((n, 3)); Ts = np.zeros(n); Ws = np.zeros((n, 9, 9))
+        for i in range(1, n):
+            pre = self.frames[i].preint
+            dRs[i], dvs[i], dps[i], Ts[i], Ws[i] = pre.dR, pre.dv, pre.dp, pre.dt, pre.sqrt_info()
+        self._pack = (key, (dRs, dvs, dps, Ts, Ws))
+        return self._pack[1]
+
     def _cost(self, Rs, ps, vs, P, obs):
         """ETAPE 5b. Somme des Huber(||r||) sur les observations valides + somme des 0.5 * ||W r_imu||^2 sur
         les paires d'images consécutives (pre.residual(...), pre.sqrt_info())."""
@@ -631,6 +677,9 @@ class VIO:
             e < self.huber, 0.5 * e**2, self.huber * (e - 0.5 * self.huber)
         )  # avec un carré pur, une observation aberrante (e = 20) coûterait 200 et dominerait toutes les autres ;
         c = c[valid].sum()
+        if self.imu_mode == "numba":
+            return c + _imu_cost_nb(*self._imu_pack(), np.ascontiguousarray(Rs, dtype=float), np.ascontiguousarray(ps, dtype=float),
+                                    np.ascontiguousarray(vs, dtype=float), _G_W)
 
         for i in range(1, len(Rs)):
             pre = self.frames[i].preint
@@ -681,7 +730,10 @@ class VIO:
                     if not creux:
                         Hpl[sk : sk + 6] += Hpl6[k]
             # IMU
-            for i in range(1, nF):
+            if self.imu_mode == "numba":
+                _imu_normal_nb(*self._imu_pack(), np.ascontiguousarray(Rs, dtype=float), np.ascontiguousarray(ps, dtype=float),
+                               np.ascontiguousarray(vs, dtype=float), _G_W, Hpp, gp)
+            for i in (range(1, nF) if self.imu_mode != "numba" else ()):
                 ri, Ji, Jj = self.frames[i].preint.residual(
                     Rs[i - 1], ps[i - 1], vs[i - 1], Rs[i], ps[i], vs[i]
                 )

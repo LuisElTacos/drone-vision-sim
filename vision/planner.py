@@ -94,11 +94,13 @@ def cout_arc(n, m, cost_extra, voxel_size):
 def heuristic(n, voxel_size, goal_idx):
     return voxel_size * math.dist(n, goal_idx)
 
-def astar(blocked, cost_extra, start_idx, goal_idx, voxel_size, w=2.0, version="numba"):
+def astar(blocked, cost_extra, start_idx, goal_idx, voxel_size, w=2.0, version="numba", cost_vert=None):
     """version="numba" : même algorithme (même ordre du tas (f, h, indice), mêmes arrondis), compilé ;
-    version="python" : version d'origine."""
+    version="python" : version d'origine.
+    cost_vert : None (défaut, inchangé) ou tableau de la forme de blocked : coût ajouté, par mètre, aux arcs qui
+    montent ou descendent (dj != 0) vers ce voxel (ex. k_unk_v * inconnu) ; inf = arc vertical interdit."""
     if version == "numba":
-        return _astar_numba(blocked, cost_extra, start_idx, goal_idx, voxel_size, w)
+        return _astar_numba(blocked, cost_extra, start_idx, goal_idx, voxel_size, w, cost_vert)
     shape = blocked.shape
     open_heap = []
     hs=heuristic(start_idx, voxel_size, goal_idx)
@@ -122,6 +124,8 @@ def astar(blocked, cost_extra, start_idx, goal_idx, voxel_size, w=2.0, version="
         for m in neighbours(n, shape) :
             if blocked[m] or m in closed: continue
             c = cout_arc(n, m, cost_extra, voxel_size)
+            if cost_vert is not None and m[1] != n[1]:
+                c = c + voxel_size * math.dist(n, m) * float(cost_vert[m])
             if g[n] + c < g[m] :
                 g[m] = g[n] + c
                 parent[m] = n
@@ -147,7 +151,7 @@ def _key_lt(F, Hh, I, a, b):
 
 
 @_njit(cache=True)
-def _astar_nb(blocked, cost_extra, s0, s1, s2, g0, g1, g2, vs, w, c32):
+def _astar_nb(blocked, cost_extra, s0, s1, s2, g0, g1, g2, vs, w, c32, cost_vert, use_v):
     nx, ny, nz = blocked.shape
     cap = 1024
     F = np.empty(cap); Hh = np.empty(cap); I = np.empty((cap, 3), np.int64)
@@ -201,6 +205,8 @@ def _astar_nb(blocked, cost_extra, s0, s1, s2, g0, g1, g2, vs, w, c32):
                         cc = float(np.float32(longueur) * (np.float32(1.0) + np.float32(cost_extra[x, y, z])))
                     else:
                         cc = longueur * (1.0 + float(cost_extra[x, y, z]))
+                    if use_v and dj != 0:
+                        cc = cc + longueur * float(cost_vert[x, y, z])
                     if gn + cc < g[x, y, z]:
                         g[x, y, z] = gn + cc
                         par[x, y, z] = (a * ny + b) * nz + c
@@ -239,11 +245,13 @@ def _astar_nb(blocked, cost_extra, s0, s1, s2, g0, g1, g2, vs, w, c32):
     return out
 
 
-def _astar_numba(blocked, cost_extra, start_idx, goal_idx, voxel_size, w):
+def _astar_numba(blocked, cost_extra, start_idx, goal_idx, voxel_size, w, cost_vert=None):
     c32 = isinstance(voxel_size * 1.0 * (1 + cost_extra.flat[0]), np.float32)
     s = [int(v) for v in start_idx]; t = [int(v) for v in goal_idx]
     out = _astar_nb(np.ascontiguousarray(blocked), np.ascontiguousarray(cost_extra), s[0], s[1], s[2], t[0], t[1], t[2],
-                    float(voxel_size), float(w), c32)
+                    float(voxel_size), float(w), c32,
+                    np.zeros((1, 1, 1)) if cost_vert is None else np.ascontiguousarray(cost_vert, np.float64),
+                    cost_vert is not None)
     if len(out) == 0:
         return None
     return [tuple(int(v) for v in r) for r in out]

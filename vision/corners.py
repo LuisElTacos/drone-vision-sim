@@ -34,17 +34,32 @@ def harris_opencv(img, sigma_d=1.0, sigma_i=1.5, k=0.04):
     return cv2.cornerHarris(g, bs, 3, k, borderType=cv2.BORDER_REFLECT)
 
 
-def detect_corners(R, rel_thresh=0.01, nms=5, max_n=500, border=6, grid_cells=(6,8)):
+# Candidats du dernier appel (même carte R) : un 2e appel sur la même carte avec un seuil et une bordure
+# plus stricts (ex. FrontEnd.renew après la détection de test_vslam) les filtre au lieu de tout recalculer.
+_cache_cand = None
+
+
+def detect_corners(R, rel_thresh=0.01, nms=5, max_n=500, border=6, grid_cells=(6,8), cache=True):
+    global _cache_cand
     M=float(R.max())
     N,P=R.shape
     if M <= 0.0:
         return np.empty((0, 3), dtype=np.float32)
-    mask_thresh = R > (rel_thresh * M) ## garde uniquement les R au-dessus d'un certain seuil
-    mask_nms = R == cv2.dilate(R, np.ones((nms, nms), np.uint8))  ## Supprime les non-maxima locaux
-    mask_border = np.zeros((N, P), dtype=bool) ## Supprime les points trop près des bords
-    mask_border[border : N - border, border : P - border] = True
-    candidates=mask_thresh & mask_nms & mask_border
-    y_idx, x_idx=np.nonzero(candidates)
+    c = _cache_cand
+    if cache and c is not None and c[0] is R and c[1] == nms and rel_thresh >= c[2] and border >= c[3] and c[4] == M:
+        # mêmes candidats, dans le même ordre (ligne par ligne), que le calcul complet ci-dessous
+        y_idx, x_idx = c[5], c[6]
+        keep = (R[y_idx, x_idx] > (rel_thresh * M)) & (y_idx >= border) & (y_idx < N - border) & (x_idx >= border) & (x_idx < P - border)
+        y_idx, x_idx = y_idx[keep], x_idx[keep]
+    else:
+        mask_thresh = R > (rel_thresh * M) ## garde uniquement les R au-dessus d'un certain seuil
+        mask_nms = R == cv2.dilate(R, np.ones((nms, nms), np.uint8))  ## Supprime les non-maxima locaux
+        mask_border = np.zeros((N, P), dtype=bool) ## Supprime les points trop près des bords
+        mask_border[border : N - border, border : P - border] = True
+        candidates=mask_thresh & mask_nms & mask_border
+        y_idx, x_idx=np.nonzero(candidates)
+        if cache:
+            _cache_cand = (R, nms, rel_thresh, border, M, y_idx, x_idx)
 
     if len(x_idx) == 0:
         return np.empty((0, 3), dtype=np.float32)
